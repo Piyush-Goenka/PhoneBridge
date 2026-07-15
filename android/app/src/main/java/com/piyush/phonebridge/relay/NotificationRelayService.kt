@@ -45,7 +45,15 @@ class NotificationRelayService : NotificationListenerService() {
             val store = PairingStore(this@NotificationRelayService)
             if (!store.isPaired || !store.mirroringEnabled) return@launch
 
-            val notification = extract(sbn) ?: return@launch
+            val notification = extract(sbn)
+            android.util.Log.d(
+                "PhoneBridge",
+                "posted pkg=${sbn.packageName} key=${sbn.key} " +
+                    "ongoing=${sbn.isOngoing} flags=0x${Integer.toHexString(sbn.notification.flags)} " +
+                    "category=${sbn.notification.category} " +
+                    "titleLen=${notification?.title?.length} textLen=${notification?.text?.length} " +
+                    "extracted=${notification != null}")
+            if (notification == null) return@launch
 
             // Only the real phone app gets the call treatment. VoIP apps like
             // WhatsApp also tag their ringing notifications CATEGORY_CALL, but
@@ -64,9 +72,16 @@ class NotificationRelayService : NotificationListenerService() {
                 return@launch
             }
 
-            if (!NotificationFilter.shouldForward(notification, store.allowlist)) return@launch
-            if (dedup.isDuplicate(notification, System.currentTimeMillis())) return@launch
+            if (!NotificationFilter.shouldForward(notification, store.allowlist)) {
+                android.util.Log.d("PhoneBridge", "dropped by filter: key=${sbn.key}")
+                return@launch
+            }
+            if (dedup.isDuplicate(notification, System.currentTimeMillis())) {
+                android.util.Log.d("PhoneBridge", "dropped as duplicate: key=${sbn.key}")
+                return@launch
+            }
 
+            android.util.Log.d("PhoneBridge", "delivering: key=${sbn.key}")
             deliver(notification, store)
         }
     }
