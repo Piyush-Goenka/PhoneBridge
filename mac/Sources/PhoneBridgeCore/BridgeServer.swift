@@ -91,29 +91,28 @@ final class HTTPHandler: ChannelInboundHandler {
             }
             body.writeBuffer(&chunk)
         case .end:
-            guard !tooLarge else {
-                head = nil
-                return
-            }
             guard let head else { return }
-            let auth = head.headers.first(name: "Authorization")
-            let result = handler.handle(
-                path: head.uri,
-                authorization: auth,
-                body: Data(body.readableBytesView))
-
-            var responseHead = HTTPResponseHead(
-                version: head.version,
-                status: HTTPResponseStatus(statusCode: result.status))
-            let responseBody = context.channel.allocator.buffer(string: result.body)
-            responseHead.headers.add(name: "Content-Type", value: "application/json")
-            responseHead.headers.add(
-                name: "Content-Length", value: String(responseBody.readableBytes))
-
-            context.write(wrapOutboundOut(.head(responseHead)), promise: nil)
-            context.write(wrapOutboundOut(.body(.byteBuffer(responseBody))), promise: nil)
-            context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
             self.head = nil
+            if tooLarge { return }
+            let auth = head.headers.first(name: "Authorization")
+            let requestBody = Data(body.readableBytesView)
+            let version = head.version
+            let loop = context.eventLoop
+            let ctx = context
+            handler.handleAsync(path: head.uri, authorization: auth, body: requestBody) { result in
+                loop.execute {
+                    var responseHead = HTTPResponseHead(
+                        version: version,
+                        status: HTTPResponseStatus(statusCode: result.status))
+                    let responseBody = ctx.channel.allocator.buffer(string: result.body)
+                    responseHead.headers.add(name: "Content-Type", value: "application/json")
+                    responseHead.headers.add(
+                        name: "Content-Length", value: String(responseBody.readableBytes))
+                    ctx.write(self.wrapOutboundOut(.head(responseHead)), promise: nil)
+                    ctx.write(self.wrapOutboundOut(.body(.byteBuffer(responseBody))), promise: nil)
+                    ctx.writeAndFlush(self.wrapOutboundOut(.end(nil)), promise: nil)
+                }
+            }
         }
     }
 }

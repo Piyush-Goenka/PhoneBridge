@@ -31,7 +31,9 @@ final class ServerIntegrationTests: XCTestCase {
         let handler = RequestHandler(
             token: info.token,
             icons: try DiskIconStore(directory: dir.appendingPathComponent("icons")),
-            sink: sink)
+            sink: sink,
+            calls: CallActionRegistry(),
+            callSink: MockCallSink())
         server = BridgeServer()
         try server.start(
             certPath: info.certPath, keyPath: info.keyPath,
@@ -81,7 +83,9 @@ final class ServerIntegrationTests: XCTestCase {
         let secondHandler = RequestHandler(
             token: info.token,
             icons: try DiskIconStore(directory: dir.appendingPathComponent("icons")),
-            sink: secondSink)
+            sink: secondSink,
+            calls: CallActionRegistry(),
+            callSink: MockCallSink())
         let secondServer = BridgeServer()
         defer { secondServer.stop() }
         try secondServer.start(

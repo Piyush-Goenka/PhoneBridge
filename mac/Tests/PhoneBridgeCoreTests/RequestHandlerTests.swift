@@ -17,10 +17,19 @@ final class MockSink: NotificationSink {
     func dismiss(key: String) { dismissed.append(key) }
 }
 
+final class MockCallSink: CallSink {
+    var calls: [(key: String, caller: String)] = []
+    var ended: [String] = []
+    func showCall(key: String, caller: String) { calls.append((key, caller)) }
+    func endCall(key: String) { ended.append(key) }
+}
+
 final class RequestHandlerTests: XCTestCase {
     private var icons: MockIconStore!
     private var sink: MockSink!
     private var handler: RequestHandler!
+    private var callSink: MockCallSink!
+    private var registry: CallActionRegistry!
 
     private let validNotify = """
         {"v":1,"key":"k1","pkg":"com.whatsapp","appName":"WhatsApp",\
@@ -30,7 +39,11 @@ final class RequestHandlerTests: XCTestCase {
     override func setUp() {
         icons = MockIconStore()
         sink = MockSink()
-        handler = RequestHandler(token: "secret", icons: icons, sink: sink)
+        callSink = MockCallSink()
+        registry = CallActionRegistry(timeout: 10)
+        handler = RequestHandler(
+            token: "secret", icons: icons, sink: sink,
+            calls: registry, callSink: callSink)
     }
 
     private func post(_ path: String, auth: String?, body: String) -> HandlerResult {
@@ -95,5 +108,68 @@ final class RequestHandlerTests: XCTestCase {
     func testUnknownPathIs404() {
         let r = post("/whatever", auth: "Bearer secret", body: "{}")
         XCTAssertEqual(r.status, 404)
+    }
+
+    func testCallShowsActionableBanner() {
+        let body = #"{"v":1,"key":"c1","caller":"Palak","postedAt":0}"#
+        let r = post("/call", auth: "Bearer secret", body: body)
+        XCTAssertEqual(r.status, 200)
+        XCTAssertEqual(callSink.calls.first?.key, "c1")
+        XCTAssertEqual(callSink.calls.first?.caller, "Palak")
+    }
+
+    func testCallMalformedIs400() {
+        XCTAssertEqual(post("/call", auth: "Bearer secret", body: "{nope").status, 400)
+    }
+
+    func testCallWaitCompletesWhenFulfilled() {
+        let expectation = expectation(description: "wait")
+        handler.handleAsync(
+            path: "/call/wait", authorization: "Bearer secret",
+            body: Data(#"{"key":"c1"}"#.utf8)) { result in
+            XCTAssertEqual(result.status, 200)
+            XCTAssertEqual(result.body, #"{"action":"silence"}"#)
+            expectation.fulfill()
+        }
+        registry.fulfill(key: "c1", action: .silence)
+        wait(for: [expectation], timeout: 2)
+    }
+
+    func testCallWaitBadTokenIs401() {
+        let expectation = expectation(description: "wait")
+        handler.handleAsync(
+            path: "/call/wait", authorization: "Bearer wrong",
+            body: Data(#"{"key":"c1"}"#.utf8)) { result in
+            XCTAssertEqual(result.status, 401)
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 2)
+    }
+
+    func testDismissEndsCallOnSink() {
+        _ = post("/dismiss", auth: "Bearer secret", body: #"{"key":"c9"}"#)
+        XCTAssertEqual(callSink.ended, ["c9"])
+    }
+
+    func testDismissFulfillsPendingWaitWithNone() {
+        let expectation = expectation(description: "wait")
+        handler.handleAsync(
+            path: "/call/wait", authorization: "Bearer secret",
+            body: Data(#"{"key":"c1"}"#.utf8)) { result in
+            XCTAssertEqual(result.body, #"{"action":"none"}"#)
+            expectation.fulfill()
+        }
+        _ = post("/dismiss", auth: "Bearer secret", body: #"{"key":"c1"}"#)
+        wait(for: [expectation], timeout: 2)
+        XCTAssertEqual(sink.dismissed, ["c1"])
+    }
+
+    func testHandleAsyncPassesThroughSyncPaths() {
+        let expectation = expectation(description: "sync")
+        handler.handleAsync(path: "/whatever", authorization: "Bearer secret", body: Data("{}".utf8)) { result in
+            XCTAssertEqual(result.status, 404)
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 2)
     }
 }
