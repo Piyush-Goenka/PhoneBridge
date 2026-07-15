@@ -8,6 +8,9 @@ import PhoneBridgeCore
 // (/dismiss), and can be clicked away.
 final class NotificationCardController: NSObject, NotificationSink {
 
+    // Clicking a card opens the app's history window (set by AppState).
+    var onOpenHistory: (() -> Void)?
+
     // Main-thread only.
     private var cards: [String: NSPanel] = [:]
     private var order: [String] = []
@@ -36,7 +39,10 @@ final class NotificationCardController: NSObject, NotificationSink {
             title: payload.title,
             text: payload.text,
             icon: icon,
-            onTap: { [weak self] in self?.close(key: key) })
+            onTap: { [weak self] in
+                self?.close(key: key)
+                self?.onOpenHistory?()
+            })
         let hosting = NSHostingView(rootView: view)
         let size = hosting.fittingSize
         hosting.frame = NSRect(origin: .zero, size: size)

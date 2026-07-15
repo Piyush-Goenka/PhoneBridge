@@ -19,14 +19,28 @@ struct HistoryView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("Recent notifications")
-                    .font(.headline)
+            HStack(spacing: 10) {
+                ZStack {
+                    Circle()
+                        .fill(Color(red: 0.95, green: 0.94, blue: 0.98))
+                        .frame(width: 30, height: 30)
+                    Image(systemName: "iphone.gen3.radiowaves.left.and.right")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Color(red: 0.49, green: 0.44, blue: 0.87))
+                }
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("Recent notifications")
+                        .font(.headline)
+                    Text("\(model.entries.count) mirrored from your phone")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 Button("Clear") { onClear() }
                     .disabled(model.entries.isEmpty)
             }
-            .padding(12)
+            .padding(14)
+            .background(Color(nsColor: .windowBackgroundColor))
             Divider()
 
             if model.entries.isEmpty {
@@ -58,10 +72,10 @@ struct HistoryView: View {
                 } else {
                     ZStack {
                         RoundedRectangle(cornerRadius: 8)
-                            .fill(Color.indigo.opacity(0.85))
+                            .fill(Color(red: 0.95, green: 0.94, blue: 0.98))
                         Image(systemName: "bell.fill")
                             .font(.system(size: 14))
-                            .foregroundStyle(.white)
+                            .foregroundStyle(Color(red: 0.49, green: 0.44, blue: 0.87))
                     }
                 }
             }

@@ -47,6 +47,9 @@ final class AppState: ObservableObject {
             callPanel.onAction = { [callRegistry] key, action in
                 callRegistry.fulfill(key: key, action: action)
             }
+            notificationCards.onOpenHistory = { [weak self] in
+                self?.showHistoryWindow()
+            }
             try server.start(certPath: info.certPath, keyPath: info.keyPath, handler: handler)
             bonjour.publish(port: server.port)
             statusLine = "Listening on port \(server.port)"
