@@ -1,8 +1,10 @@
 package com.piyush.phonebridge.relay
 
 import android.app.Notification
+import android.content.Context
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
+import android.telecom.TelecomManager
 import android.util.Base64
 import com.piyush.phonebridge.filter.DedupCache
 import com.piyush.phonebridge.filter.NotificationFilter
@@ -24,6 +26,8 @@ class NotificationRelayService : NotificationListenerService() {
     private val dedup = DedupCache()
     private val deliveredKeys: MutableSet<String> =
         Collections.synchronizedSet(LinkedHashSet())
+    private val activeCallKeys: MutableSet<String> =
+        Collections.synchronizedSet(HashSet())
 
     private var client: MacClient? = null
     private var clientToken: String? = null
@@ -33,12 +37,33 @@ class NotificationRelayService : NotificationListenerService() {
         super.onDestroy()
     }
 
+    private fun defaultDialerPackage(): String? =
+        (getSystemService(Context.TELECOM_SERVICE) as TelecomManager).defaultDialerPackage
+
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         scope.launch {
             val store = PairingStore(this@NotificationRelayService)
             if (!store.isPaired || !store.mirroringEnabled) return@launch
 
             val notification = extract(sbn) ?: return@launch
+
+            // Only the real phone app gets the call treatment. VoIP apps like
+            // WhatsApp also tag their ringing notifications CATEGORY_CALL, but
+            // reject/silence semantics are only reliable for telephony calls,
+            // so everything else falls through to the normal mirror path.
+            if (notification.category == "call" && store.mirrorCallsEnabled &&
+                notification.pkg == defaultDialerPackage()
+            ) {
+                val sessionStarted = CallControl.isRinging(this@NotificationRelayService) &&
+                    synchronized(activeCallKeys) {
+                        if (activeCallKeys.isEmpty()) activeCallKeys.add(notification.key) else false
+                    }
+                if (sessionStarted) {
+                    handleCall(notification, store)
+                }
+                return@launch
+            }
+
             if (!NotificationFilter.shouldForward(notification, store.allowlist)) return@launch
             if (dedup.isDuplicate(notification, System.currentTimeMillis())) return@launch
 
@@ -47,6 +72,9 @@ class NotificationRelayService : NotificationListenerService() {
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
+        if (activeCallKeys.remove(sbn.key)) {
+            CallControl.onRingEnded(this)
+        }
         if (!deliveredKeys.remove(sbn.key)) return
         scope.launch {
             val store = PairingStore(this@NotificationRelayService)
@@ -119,6 +147,51 @@ class NotificationRelayService : NotificationListenerService() {
                 SendLog.add(n.appName, n.title, "dropped: re-pair needed")
             is MacClient.SendResult.Failed ->
                 SendLog.add(n.appName, n.title, "dropped: ${result.reason}")
+        }
+    }
+
+    private suspend fun handleCall(n: RelayNotification, store: PairingStore) {
+        val caller = n.title.ifBlank { n.text.ifBlank { "Unknown caller" } }
+        val macClient = clientFor(store)
+        val host = store.host
+        if (macClient == null || host == null) {
+            SendLog.add("Call", caller, "call dropped: not paired")
+            activeCallKeys.remove(n.key)
+            return
+        }
+
+        val callBody = JSONObject()
+            .put("v", 1)
+            .put("key", n.key)
+            .put("caller", caller)
+            .put("postedAt", n.postedAt)
+            .toString()
+        val posted = macClient.postCall(host, store.port, callBody)
+        if (posted !is MacClient.SendResult.Ok) {
+            SendLog.add("Call", caller, "call dropped: Mac unreachable")
+            activeCallKeys.remove(n.key)
+            return
+        }
+        deliveredKeys.add(n.key)
+        SendLog.add("Call", caller, "ringing on Mac")
+
+        val waitBody = JSONObject().put("key", n.key).toString()
+        when (val wait = macClient.postCallWait(host, store.port, waitBody)) {
+            is MacClient.WaitResult.Action -> when (wait.action) {
+                "reject" -> SendLog.add(
+                    "Call", caller, CallControl.reject(this@NotificationRelayService))
+                "silence" -> {
+                    SendLog.add(
+                        "Call", caller, CallControl.silence(this@NotificationRelayService))
+                    scope.launch {
+                        kotlinx.coroutines.delay(60_000)
+                        CallControl.onRingEnded(this@NotificationRelayService)
+                    }
+                }
+                else -> {}
+            }
+            is MacClient.WaitResult.Failed ->
+                SendLog.add("Call", caller, "call wait failed: ${wait.reason}")
         }
     }
 

@@ -30,6 +30,10 @@ class PairingStore(context: Context) {
         get() = prefs.getBoolean("mirroring", true)
         set(value) = prefs.edit().putBoolean("mirroring", value).apply()
 
+    var mirrorCallsEnabled: Boolean
+        get() = prefs.getBoolean("mirrorCalls", false)
+        set(value) = prefs.edit().putBoolean("mirrorCalls", value).apply()
+
     val isPaired: Boolean
         get() = token != null && fingerprint != null
 

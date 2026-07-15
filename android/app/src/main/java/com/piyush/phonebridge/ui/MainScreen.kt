@@ -57,11 +57,13 @@ fun MainScreen(
     accessGranted: MutableState<Boolean>,
     onEnableAccess: () -> Unit,
     onScanQr: () -> Unit,
+    onMirrorCalls: (Boolean) -> Unit,
 ) {
     val context = LocalContext.current
     val apps = remember { launcherApps(context.packageManager) }
     var allowlist by remember { mutableStateOf(store.allowlist) }
     var mirroring by remember { mutableStateOf(store.mirroringEnabled) }
+    var mirrorCalls by remember { mutableStateOf(store.mirrorCallsEnabled) }
     val log by SendLog.entries.collectAsState()
     val timeFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.US) }
 
@@ -108,6 +110,14 @@ fun MainScreen(
                         Switch(checked = mirroring, onCheckedChange = {
                             mirroring = it
                             store.mirroringEnabled = it
+                        })
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Mirror calls (Reject and Silence from Mac)",
+                            modifier = Modifier.weight(1f))
+                        Switch(checked = mirrorCalls, onCheckedChange = {
+                            mirrorCalls = it
+                            onMirrorCalls(it)
                         })
                     }
                 }

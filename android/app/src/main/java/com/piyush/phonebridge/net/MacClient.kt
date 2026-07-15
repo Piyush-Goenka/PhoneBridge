@@ -19,6 +19,11 @@ class MacClient(private val token: String, fingerprintHex: String) {
         data class Failed(val reason: String) : SendResult
     }
 
+    sealed interface WaitResult {
+        data class Action(val action: String) : WaitResult
+        data class Failed(val reason: String) : WaitResult
+    }
+
     private val jsonType = "application/json".toMediaType()
     private val client: OkHttpClient
 
@@ -53,6 +58,10 @@ class MacClient(private val token: String, fingerprintHex: String) {
             .build()
     }
 
+    private val waitClient: OkHttpClient by lazy {
+        client.newBuilder().readTimeout(55, TimeUnit.SECONDS).build()
+    }
+
     fun postNotify(host: String, port: Int, json: String): SendResult =
         post(host, port, "/notify", json)
 
@@ -61,6 +70,34 @@ class MacClient(private val token: String, fingerprintHex: String) {
 
     fun postDismiss(host: String, port: Int, json: String): SendResult =
         post(host, port, "/dismiss", json)
+
+    fun postCall(host: String, port: Int, json: String): SendResult =
+        post(host, port, "/call", json)
+
+    fun postCallWait(host: String, port: Int, json: String): WaitResult {
+        val request = Request.Builder()
+            .url("https://$host:$port/call/wait")
+            .header("Authorization", "Bearer $token")
+            .post(json.toRequestBody(jsonType))
+            .build()
+        return try {
+            waitClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    WaitResult.Failed("HTTP ${response.code}")
+                } else {
+                    val body = response.body?.string() ?: ""
+                    val action = try {
+                        org.json.JSONObject(body).optString("action", "none")
+                    } catch (e: org.json.JSONException) {
+                        "none"
+                    }
+                    WaitResult.Action(action)
+                }
+            }
+        } catch (e: Exception) {
+            WaitResult.Failed(e.message ?: e.javaClass.simpleName)
+        }
+    }
 
     private fun post(host: String, port: Int, path: String, json: String): SendResult {
         val request = Request.Builder()

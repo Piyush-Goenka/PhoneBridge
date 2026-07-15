@@ -92,4 +92,40 @@ class MacClientTest {
         client.postDismiss(server.hostName, server.port, """{"key":"k"}""")
         assertEquals("/dismiss", server.takeRequest().path)
     }
+
+    @Test
+    fun callHitsCallPath() {
+        server.enqueue(MockResponse().setBody("{}"))
+        val client = MacClient("tok", fingerprint)
+        client.postCall(server.hostName, server.port, """{"v":1}""")
+        assertEquals("/call", server.takeRequest().path)
+    }
+
+    @Test
+    fun callWaitParsesAction() {
+        server.enqueue(MockResponse().setBody("""{"action":"reject"}"""))
+        val client = MacClient("tok", fingerprint)
+        val result = client.postCallWait(server.hostName, server.port, """{"key":"k"}""")
+        assertEquals(MacClient.WaitResult.Action("reject"), result)
+        assertEquals("/call/wait", server.takeRequest().path)
+    }
+
+    @Test
+    fun callWaitDefaultsToNoneOnMissingField() {
+        server.enqueue(MockResponse().setBody("{}"))
+        val client = MacClient("tok", fingerprint)
+        assertEquals(
+            MacClient.WaitResult.Action("none"),
+            client.postCallWait(server.hostName, server.port, """{"key":"k"}"""))
+    }
+
+    @Test
+    fun callWaitConnectionFailureIsFailed() {
+        val port = server.port
+        server.shutdown()
+        val client = MacClient("tok", fingerprint)
+        assertTrue(
+            client.postCallWait("localhost", port, """{"key":"k"}""")
+                is MacClient.WaitResult.Failed)
+    }
 }

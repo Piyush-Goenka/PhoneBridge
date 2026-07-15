@@ -1,5 +1,7 @@
 package com.piyush.phonebridge.ui
 
+import android.Manifest
+import android.app.NotificationManager
 import android.content.Intent
 import android.os.Bundle
 import android.provider.Settings
@@ -33,6 +35,34 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val callPermissionLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+    ) {
+        // Runs after the runtime dialog resolves, so the DND settings screen
+        // never races with a pending permission prompt.
+        promptForDndAccessIfNeeded()
+    }
+
+    private fun onMirrorCallsChanged(enabled: Boolean) {
+        store.mirrorCallsEnabled = enabled
+        if (!enabled) return
+        callPermissionLauncher.launch(
+            arrayOf(
+                Manifest.permission.ANSWER_PHONE_CALLS,
+                Manifest.permission.READ_PHONE_STATE))
+    }
+
+    private fun promptForDndAccessIfNeeded() {
+        val notifications = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        if (!notifications.isNotificationPolicyAccessGranted) {
+            Toast.makeText(
+                this,
+                "Allow Do Not Disturb access so Silence can quiet the ringer",
+                Toast.LENGTH_LONG).show()
+            startActivity(Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS))
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -54,6 +84,7 @@ class MainActivity : ComponentActivity() {
                                 .setBeepEnabled(false)
                                 .setOrientationLocked(true))
                     },
+                    onMirrorCalls = ::onMirrorCallsChanged,
                 )
             }
         }
