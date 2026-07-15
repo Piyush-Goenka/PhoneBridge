@@ -75,9 +75,9 @@ The POST carries only a hash of the app icon, never the image. If the Mac has no
 
 This is best-effort like everything else: if the Mac is unreachable, the dismiss is dropped. There is one visible consequence, and it is accepted rather than solved: if the Mac received a notification and then went to sleep, dismissing it on the phone leaves that banner in the Mac's Notification Center until it is cleared there. Fixing this would require a queue, which principle 2 rules out.
 
-### macOS attribution, a known limitation
+### macOS presentation (amended 2026-07-15)
 
-macOS attributes every banner to the bridge app, not to WhatsApp or Slack. This is inherent to how notification authorization works and cannot be worked around. The originating app appears as the banner's subtitle and its icon as the thumbnail.
+Originally the Mac showed native macOS notifications, which attribute every banner to the bridge app and cannot show the originating app's icon in the icon slot. This was replaced at Piyush's request: the Mac now renders mirrored notifications as custom floating cards (top-right corner, real app icon from the icon cache, app name, title, text). Cards auto-dismiss after about 6 seconds, close early when the notification is cleared on the phone, stack newest-on-top below any active call panel, and can be clicked away. Tradeoff accepted knowingly: no Notification Center history; a missed card is gone from the Mac (it remains on the phone). UNUserNotificationCenter is no longer used at all, so no notification permission is needed.
 
 ## Wire protocol
 
@@ -118,7 +118,7 @@ All requests carry `Authorization: Bearer <token>`. Anything without it gets a 4
 
 - **`BridgeServer`**, SwiftNIO + NIOSSL serving `/notify`, `/icon`, `/dismiss`. 401s anything without a valid token.
 - **`Pairing`**, generates the certificate and token on first run, stores them as 0600 files in Application Support, renders the QR with CoreImage. (Not Keychain: the app is ad-hoc signed and re-signed on every rebuild, which changes the code signature and breaks Keychain ACL matching, causing repeated permission failures. Filesystem permissions on a single-user machine are the right trade.)
-- **`Notifier`**, wraps `UNUserNotificationCenter` and the on-disk icon cache.
+- **`NotificationCardController`** (amended 2026-07-15), renders each mirrored notification as a floating card with the cached app icon; replaces the earlier `Notifier`/`UNUserNotificationCenter` approach.
 - **`MenuBarApp`**, SwiftUI `MenuBarExtra`: status, mirroring on/off, the QR sheet, launch-at-login via `SMAppService`.
 
 Bonjour advertisement runs alongside the NIO server via Foundation's `NetService`. It is deprecated but fully functional on macOS 15, and the alternative (`NWListener`) would couple advertisement to its own connection handling and force abandoning NIO's HTTP stack. Decision settled during planning: `NetService`, accepting the deprecation warning.
