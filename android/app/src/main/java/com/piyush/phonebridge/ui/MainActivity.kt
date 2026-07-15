@@ -9,7 +9,6 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.mutableStateOf
 import androidx.core.app.NotificationManagerCompat
 import com.journeyapps.barcodescanner.ScanContract
@@ -68,7 +67,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         store = PairingStore(this)
         setContent {
-            MaterialTheme {
+            PhoneBridgeTheme {
                 MainScreen(
                     store = store,
                     paired = paired,
