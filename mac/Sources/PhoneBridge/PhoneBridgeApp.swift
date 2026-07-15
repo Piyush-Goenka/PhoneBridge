@@ -10,6 +10,7 @@ struct PhoneBridgeApp: App {
             Text(state.statusLine)
             Divider()
             Toggle("Mirroring", isOn: $state.mirroring)
+            Button("Recent notifications") { state.showHistoryWindow() }
             Button("Show pairing QR") { state.showQRWindow() }
             Button(state.startsAtLogin ? "Disable start at login" : "Start at login") {
                 state.toggleLoginItem()

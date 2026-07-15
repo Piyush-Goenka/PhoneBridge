@@ -35,3 +35,11 @@ PLIST
 
 codesign --force --sign - "$APP"
 echo "Built $APP"
+
+# "make-app.sh install" also copies the bundle to /Applications so Spotlight
+# and Launchpad can relaunch it after a quit.
+if [ "${1:-}" = "install" ]; then
+    rm -rf /Applications/PhoneBridge.app
+    cp -R "$APP" /Applications/PhoneBridge.app
+    echo "Installed /Applications/PhoneBridge.app"
+fi

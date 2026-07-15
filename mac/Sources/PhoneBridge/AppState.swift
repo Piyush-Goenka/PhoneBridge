@@ -11,32 +11,74 @@ final class AppState: ObservableObject {
     @Published var statusLine = "Starting"
     @Published var startsAtLogin = SMAppService.mainApp.status == .enabled
 
-    private let notifier = Notifier()
+    private let notificationCards = NotificationCardController()
+    private let callPanel = CallPanelController()
     private let gate: GatedSink
+    private let callRegistry = CallActionRegistry()
     private let server = BridgeServer()
     private let bonjour = BonjourAdvertiser()
+    private let history: NotificationHistory
+    let historyModel = HistoryModel()
+    private var iconStore: DiskIconStore?
     private var pairing: PairingInfo?
     private var qrWindow: NSWindow?
+    private var historyWindow: NSWindow?
 
     init() {
-        gate = GatedSink(wrapping: notifier)
+        let dir = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("PhoneBridge")
+        history = NotificationHistory(fileURL: dir.appendingPathComponent("history.json"))
+        gate = GatedSink(
+            wrapping: HistorySink(wrapping: notificationCards, history: history),
+            calls: callPanel)
+        historyModel.entries = history.entries
+        history.onChange = { [historyModel] entries in
+            DispatchQueue.main.async { historyModel.entries = entries }
+        }
         do {
-            let dir = FileManager.default
-                .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("PhoneBridge")
             let info = try Pairing.ensure(directory: dir)
             pairing = info
             let icons = try DiskIconStore(directory: dir.appendingPathComponent("icons"))
-            let handler = RequestHandler(token: info.token, icons: icons, sink: gate)
+            iconStore = icons
+            let handler = RequestHandler(
+                token: info.token, icons: icons, sink: gate,
+                calls: callRegistry, callSink: gate)
+            callPanel.onAction = { [callRegistry] key, action in
+                callRegistry.fulfill(key: key, action: action)
+            }
             try server.start(certPath: info.certPath, keyPath: info.keyPath, handler: handler)
             bonjour.publish(port: server.port)
-            notifier.activate(onDenied: { [weak self] in
-                self?.statusLine = "Notifications blocked: enable PhoneBridge in System Settings, Notifications"
-            })
             statusLine = "Listening on port \(server.port)"
         } catch {
             statusLine = "Failed to start: \(error.localizedDescription)"
         }
+    }
+
+    func showHistoryWindow() {
+        if let existing = historyWindow {
+            existing.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let view = HistoryView(
+            model: historyModel,
+            iconFor: { [weak self] hash in
+                guard !hash.isEmpty, let path = self?.iconStore?.path(hash) else { return nil }
+                return NSImage(contentsOf: path)
+            },
+            onClear: { [weak self] in self?.history.clear() })
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 480),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered, defer: false)
+        window.title = "PhoneBridge history"
+        window.contentView = NSHostingView(rootView: view)
+        window.isReleasedWhenClosed = false
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        historyWindow = window
     }
 
     func showQRWindow() {
