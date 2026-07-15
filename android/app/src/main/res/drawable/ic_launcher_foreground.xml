@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Phone body -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M46,30h16a5,5 0 0 1 5,5v38a5,5 0 0 1 -5,5h-16a5,5 0 0 1 -5,-5v-38a5,5 0 0 1 5,-5z" />
+    <!-- Screen -->
+    <path
+        android:fillColor="#3730A3"
+        android:pathData="M45,37h18v29h-18z" />
+    <!-- Home dot -->
+    <path
+        android:fillColor="#3730A3"
+        android:pathData="M51.5,72.5a2.5,2.5 0 1 0 5,0a2.5,2.5 0 1 0 -5,0" />
+    <!-- Notification badge -->
+    <path
+        android:fillColor="#FBBF24"
+        android:pathData="M59,33a7,7 0 1 0 14,0a7,7 0 1 0 -14,0" />
+</vector>
