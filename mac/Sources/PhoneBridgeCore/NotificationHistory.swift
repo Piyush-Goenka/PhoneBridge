@@ -8,10 +8,15 @@ public struct HistoryEntry: Codable, Equatable, Identifiable {
     public let text: String
     public let iconHash: String
     public let receivedAt: Double
+    // "call" marks a mirrored call; nil for a normal notification. Optional so
+    // history written before this field decodes cleanly.
+    public let kind: String?
+
+    public var isCall: Bool { kind == "call" }
 
     public init(
         id: UUID = UUID(), key: String, appName: String, title: String,
-        text: String, iconHash: String, receivedAt: Double
+        text: String, iconHash: String, receivedAt: Double, kind: String? = nil
     ) {
         self.id = id
         self.key = key
@@ -20,6 +25,7 @@ public struct HistoryEntry: Codable, Equatable, Identifiable {
         self.text = text
         self.iconHash = iconHash
         self.receivedAt = receivedAt
+        self.kind = kind
     }
 }
 
@@ -51,13 +57,27 @@ public final class NotificationHistory {
     }
 
     public func record(_ payload: NotifyPayload) {
-        let entry = HistoryEntry(
+        append(HistoryEntry(
             key: payload.key,
             appName: payload.appName,
             title: payload.title,
             text: payload.text,
             iconHash: payload.iconHash,
-            receivedAt: Date().timeIntervalSince1970)
+            receivedAt: Date().timeIntervalSince1970))
+    }
+
+    public func recordCall(key: String, caller: String) {
+        append(HistoryEntry(
+            key: key,
+            appName: "Phone",
+            title: caller,
+            text: "Incoming call",
+            iconHash: "",
+            receivedAt: Date().timeIntervalSince1970,
+            kind: "call"))
+    }
+
+    private func append(_ entry: HistoryEntry) {
         lock.lock()
         stored = Array(([entry] + stored).prefix(cap))
         let snapshot = stored
@@ -101,5 +121,26 @@ public final class HistorySink: NotificationSink {
 
     public func dismiss(key: String) {
         inner.dismiss(key: key)
+    }
+}
+
+// Records every mirrored call into history, then forwards to the call panel.
+// Sits inside the mirroring gate, mirroring HistorySink for notifications.
+public final class CallHistorySink: CallSink {
+    private let inner: CallSink
+    private let history: NotificationHistory
+
+    public init(wrapping inner: CallSink, history: NotificationHistory) {
+        self.inner = inner
+        self.history = history
+    }
+
+    public func showCall(key: String, caller: String) {
+        history.recordCall(key: key, caller: caller)
+        inner.showCall(key: key, caller: caller)
+    }
+
+    public func endCall(key: String) {
+        inner.endCall(key: key)
     }
 }

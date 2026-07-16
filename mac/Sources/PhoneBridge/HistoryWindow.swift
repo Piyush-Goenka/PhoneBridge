@@ -11,6 +11,8 @@ struct HistoryView: View {
     let iconFor: (String) -> NSImage?
     let onClear: () -> Void
 
+    @State private var expanded: Set<UUID> = []
+
     private static let timeFormat: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "d MMM, HH:mm"
@@ -63,9 +65,18 @@ struct HistoryView: View {
     }
 
     private func row(_ entry: HistoryEntry) -> some View {
-        HStack(alignment: .top, spacing: 12) {
+        let isExpanded = expanded.contains(entry.id)
+        return HStack(alignment: .top, spacing: 12) {
             Group {
-                if let icon = iconFor(entry.iconHash) {
+                if entry.isCall {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color(red: 0.20, green: 0.65, blue: 0.44).opacity(0.15))
+                        Image(systemName: "phone.fill")
+                            .font(.system(size: 14))
+                            .foregroundStyle(Color(red: 0.20, green: 0.65, blue: 0.44))
+                    }
+                } else if let icon = iconFor(entry.iconHash) {
                     Image(nsImage: icon)
                         .resizable()
                         .interpolation(.high)
@@ -97,14 +108,34 @@ struct HistoryView: View {
                     Text(entry.text)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
-                        .lineLimit(2)
+                        .lineLimit(isExpanded ? nil : 2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                Text(entry.appName)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                HStack {
+                    Text(entry.appName)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                    if entry.text.count > 90 {
+                        Image(systemName: "chevron.down")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.tertiary)
+                            .rotationEffect(.degrees(isExpanded ? 180 : 0))
+                    }
+                }
             }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            withAnimation(.easeInOut(duration: 0.15)) {
+                if isExpanded {
+                    expanded.remove(entry.id)
+                } else {
+                    expanded.insert(entry.id)
+                }
+            }
+        }
     }
 }

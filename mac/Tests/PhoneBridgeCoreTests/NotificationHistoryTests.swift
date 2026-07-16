@@ -51,6 +51,27 @@ final class NotificationHistoryTests: XCTestCase {
         XCTAssertTrue(NotificationHistory(fileURL: fileURL).entries.isEmpty)
     }
 
+    func testRecordCallMarksKindAndCaller() {
+        let history = NotificationHistory(fileURL: fileURL)
+        history.recordCall(key: "c1", caller: "Mummy")
+        let entry = history.entries.first
+        XCTAssertEqual(entry?.title, "Mummy")
+        XCTAssertEqual(entry?.appName, "Phone")
+        XCTAssertTrue(entry?.isCall == true)
+    }
+
+    func testCallHistorySinkRecordsAndForwards() {
+        let history = NotificationHistory(fileURL: fileURL)
+        let inner = MockCallSink()
+        let sink = CallHistorySink(wrapping: inner, history: history)
+        sink.showCall(key: "c1", caller: "Mummy")
+        sink.endCall(key: "c1")
+        XCTAssertEqual(history.entries.count, 1)
+        XCTAssertTrue(history.entries.first?.isCall == true)
+        XCTAssertEqual(inner.calls.first?.caller, "Mummy")
+        XCTAssertEqual(inner.ended, ["c1"])
+    }
+
     func testHistorySinkRecordsAndForwards() {
         let history = NotificationHistory(fileURL: fileURL)
         let inner = MockSink()

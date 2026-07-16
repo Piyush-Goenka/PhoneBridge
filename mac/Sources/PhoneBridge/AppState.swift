@@ -31,7 +31,7 @@ final class AppState: ObservableObject {
         history = NotificationHistory(fileURL: dir.appendingPathComponent("history.json"))
         gate = GatedSink(
             wrapping: HistorySink(wrapping: notificationCards, history: history),
-            calls: callPanel)
+            calls: CallHistorySink(wrapping: callPanel, history: history))
         historyModel.entries = history.entries
         history.onChange = { [historyModel] entries in
             DispatchQueue.main.async { historyModel.entries = entries }
