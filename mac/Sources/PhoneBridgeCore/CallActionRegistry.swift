@@ -1,6 +1,7 @@
 import Foundation
 
 public enum CallAction: String {
+    case answer
     case reject
     case silence
     case none

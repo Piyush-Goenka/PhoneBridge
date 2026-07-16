@@ -29,10 +29,12 @@ final class CallPanelController: NSObject, CallSink {
 
         let view = CallPanelView(
             caller: caller,
+            onAnswer: { [weak self] in self?.finish(key: key, action: .answer) },
             onSilence: { [weak self] in self?.finish(key: key, action: .silence) },
             onReject: { [weak self] in self?.finish(key: key, action: .reject) })
         let hosting = NSHostingView(rootView: view)
-        hosting.frame = NSRect(x: 0, y: 0, width: 360, height: 124)
+        let size = hosting.fittingSize
+        hosting.frame = NSRect(origin: .zero, size: size)
 
         let panel = makeCardPanel(hosting: hosting)
         panels[key] = panel
@@ -62,6 +64,7 @@ final class CallPanelController: NSObject, CallSink {
 
 struct CallPanelView: View {
     let caller: String
+    let onAnswer: () -> Void
     let onSilence: () -> Void
     let onReject: () -> Void
 
@@ -95,6 +98,13 @@ struct CallPanelView: View {
             Spacer(minLength: 8)
 
             VStack(spacing: 8) {
+                Button(action: onAnswer) {
+                    Label("Answer", systemImage: "phone.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.green)
+
                 Button(action: onReject) {
                     Label("Reject", systemImage: "phone.down.fill")
                         .frame(maxWidth: .infinity)

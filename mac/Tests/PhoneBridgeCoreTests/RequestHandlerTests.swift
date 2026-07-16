@@ -135,6 +135,18 @@ final class RequestHandlerTests: XCTestCase {
         wait(for: [expectation], timeout: 2)
     }
 
+    func testCallWaitAnswerAction() {
+        let expectation = expectation(description: "wait")
+        handler.handleAsync(
+            path: "/call/wait", authorization: "Bearer secret",
+            body: Data(#"{"key":"c2"}"#.utf8)) { result in
+            XCTAssertEqual(result.body, #"{"action":"answer"}"#)
+            expectation.fulfill()
+        }
+        registry.fulfill(key: "c2", action: .answer)
+        wait(for: [expectation], timeout: 2)
+    }
+
     func testCallWaitBadTokenIs401() {
         let expectation = expectation(description: "wait")
         handler.handleAsync(

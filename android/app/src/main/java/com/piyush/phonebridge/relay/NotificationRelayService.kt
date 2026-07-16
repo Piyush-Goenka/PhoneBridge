@@ -193,6 +193,8 @@ class NotificationRelayService : NotificationListenerService() {
         val waitBody = JSONObject().put("key", n.key).toString()
         when (val wait = macClient.postCallWait(host, store.port, waitBody)) {
             is MacClient.WaitResult.Action -> when (wait.action) {
+                "answer" -> SendLog.add(
+                    "Call", caller, CallControl.answer(this@NotificationRelayService))
                 "reject" -> SendLog.add(
                     "Call", caller, CallControl.reject(this@NotificationRelayService))
                 "silence" -> {

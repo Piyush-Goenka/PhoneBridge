@@ -25,6 +25,21 @@ object CallControl {
         return telephony.callState == TelephonyManager.CALL_STATE_RINGING
     }
 
+    fun answer(context: Context): String {
+        if (!granted(context, Manifest.permission.ANSWER_PHONE_CALLS)) {
+            return "answer failed: no permission"
+        }
+        if (!isRinging(context)) return "answer skipped: not ringing"
+        val telecom = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
+        return try {
+            @Suppress("DEPRECATION")
+            telecom.acceptRingingCall()
+            "call answered"
+        } catch (e: SecurityException) {
+            "answer failed"
+        }
+    }
+
     fun reject(context: Context): String {
         if (!granted(context, Manifest.permission.ANSWER_PHONE_CALLS)) {
             return "reject failed: no permission"

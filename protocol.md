@@ -74,7 +74,7 @@ Response `200 {}`. Shows an actionable Incoming Call banner (Reject, Silence) on
 {"key":"0|com.google.android.dialer|1|null|10"}
 ```
 
-Held open by the Mac for up to 45 seconds, then `200 {"action":"reject"|"silence"|"none"}`.
+Held open by the Mac for up to 45 seconds, then `200 {"action":"answer"|"reject"|"silence"|"none"}`.
 The action reflects the button clicked on the Mac banner; `none` means timeout or
 banner dismissed. Clients must use a read timeout of at least 50 seconds for this
 endpoint only. A phone-side `/dismiss` for the same key (ring ended) fulfills any

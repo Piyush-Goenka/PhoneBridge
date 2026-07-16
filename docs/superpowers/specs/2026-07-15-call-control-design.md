@@ -28,6 +28,7 @@ If the Mac is unreachable, the `/call` POST fails and the phone does nothing fur
 
 ### Executing actions (phone)
 
+- **Answer** (added later in session): `TelecomManager.acceptRingingCall()`. The call connects on the phone; its audio cannot be moved to the Mac (platform restriction), so this is "pick up while the phone is within reach".
 - **Reject**: `TelecomManager.endCall()`.
 - **Silence**: set ringer mode to silent, then restore the previous ringer mode when the phone leaves the RINGING state (with a 60 s fallback restore in case state tracking fails).
 - **Guard**: both actions execute only if the phone is still RINGING at the moment the command arrives. This prevents the race where a Reject clicked just after picking up would hang up an active call.
