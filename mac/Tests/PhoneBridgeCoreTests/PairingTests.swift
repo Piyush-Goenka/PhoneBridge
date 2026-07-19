@@ -41,6 +41,24 @@ final class PairingTests: XCTestCase {
         }
     }
 
+    func testPrivateIPv4Recognition() {
+        XCTAssertTrue(Pairing.isPrivateIPv4("192.168.1.5"))
+        XCTAssertTrue(Pairing.isPrivateIPv4("10.0.0.1"))
+        XCTAssertTrue(Pairing.isPrivateIPv4("172.16.9.9"))
+        XCTAssertTrue(Pairing.isPrivateIPv4("172.31.255.254"))
+        XCTAssertFalse(Pairing.isPrivateIPv4("172.32.0.1"))
+        XCTAssertFalse(Pairing.isPrivateIPv4("8.8.8.8"))
+        XCTAssertFalse(Pairing.isPrivateIPv4("169.254.1.1"))
+        XCTAssertFalse(Pairing.isPrivateIPv4("not-an-ip"))
+    }
+
+    func testPrimaryIPv4LooksLikeADottedQuadWhenPresent() {
+        guard let ip = Pairing.primaryIPv4() else { return }
+        let octets = ip.split(separator: ".").compactMap { Int($0) }
+        XCTAssertEqual(octets.count, 4)
+        XCTAssertTrue(octets.allSatisfy { (0...255).contains($0) })
+    }
+
     func testQRPayloadIsValidJSON() throws {
         let info = try Pairing.ensure(directory: dir)
         let payload = Pairing.qrPayload(info: info, port: 52735)

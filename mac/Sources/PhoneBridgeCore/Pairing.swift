@@ -60,12 +60,66 @@ public enum Pairing {
     }
 
     public static func primaryIPv4() -> String? {
+        // The phone reaches the Mac over the LAN, so the QR must advertise
+        // the LAN interface's address. Asking "which source address reaches
+        // the internet" (the old approach) breaks under a VPN: the default
+        // route moves into the tunnel and the answer becomes the utun
+        // address, which the phone cannot connect to. Enumerate interfaces
+        // instead, skip tunnels, and prefer a private address on a real
+        // interface (en0 first). The routing trick survives as fallback.
+        let tunnelPrefixes = ["utun", "tun", "tap", "ppp", "ipsec", "awdl", "llw", "bridge"]
+        var candidates: [(interface: String, ip: String)] = []
+
+        var first: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&first) == 0 else { return routedIPv4() }
+        defer { freeifaddrs(first) }
+        var cursor = first
+        while let current = cursor {
+            defer { cursor = current.pointee.ifa_next }
+            let flags = current.pointee.ifa_flags
+            guard flags & UInt32(IFF_UP) != 0,
+                  flags & UInt32(IFF_LOOPBACK) == 0,
+                  let sa = current.pointee.ifa_addr,
+                  sa.pointee.sa_family == sa_family_t(AF_INET)
+            else { continue }
+            let name = String(cString: current.pointee.ifa_name)
+            guard !tunnelPrefixes.contains(where: { name.hasPrefix($0) }) else { continue }
+            var addr = sa.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
+                $0.pointee.sin_addr
+            }
+            var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+            guard inet_ntop(AF_INET, &addr, &buffer, socklen_t(INET_ADDRSTRLEN)) != nil else {
+                continue
+            }
+            candidates.append((name, String(cString: buffer)))
+        }
+
+        let preferred = candidates
+            .filter { isPrivateIPv4($0.ip) }
+            .sorted { lhs, rhs in
+                let l = lhs.interface.hasPrefix("en")
+                let r = rhs.interface.hasPrefix("en")
+                return l != r ? l : lhs.interface < rhs.interface
+            }
+        return preferred.first?.ip ?? routedIPv4()
+    }
+
+    public static func isPrivateIPv4(_ ip: String) -> Bool {
+        let octets = ip.split(separator: ".").compactMap { UInt8($0) }
+        guard octets.count == 4 else { return false }
+        return octets[0] == 10
+            || (octets[0] == 172 && (16...31).contains(octets[1]))
+            || (octets[0] == 192 && octets[1] == 168)
+    }
+
+    // Which source address reaches the internet: connecting a UDP socket
+    // sends nothing, it just makes the kernel pick the outbound interface,
+    // whose address getsockname reveals.
+    private static func routedIPv4() -> String? {
         let sock = socket(AF_INET, SOCK_DGRAM, 0)
         guard sock >= 0 else { return nil }
         defer { close(sock) }
 
-        // Connecting a UDP socket sends nothing; it just makes the kernel
-        // pick the outbound interface, whose address getsockname reveals.
         var remote = sockaddr_in()
         remote.sin_family = sa_family_t(AF_INET)
         remote.sin_port = in_port_t(53).bigEndian

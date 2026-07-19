@@ -65,6 +65,14 @@ delivery attempt, in order:
   must never show a stale IP.
 - QR window content is regenerated on every open (today the first render is
   cached forever).
+- **VPN-safe address pick (amended 2026-07-19).** The QR's host used to be
+  "the source address that reaches 8.8.8.8", which under a VPN is the utun
+  tunnel address, unreachable from the phone. `primaryIPv4` now enumerates
+  interfaces, skips tunnels (utun/tun/tap/ppp/ipsec/awdl/llw/bridge), and
+  prefers a private address on a real interface (en0 first); the routing
+  trick remains only as a fallback. Mirroring itself never depended on the
+  VPN: the server binds 0.0.0.0 and the phone talks straight to the LAN IP,
+  whose connected route stays on en0 even when a VPN owns the default route.
 
 ## Considered and rejected
 
