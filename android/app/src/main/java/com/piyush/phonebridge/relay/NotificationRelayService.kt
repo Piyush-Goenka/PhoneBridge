@@ -9,8 +9,8 @@ import android.util.Base64
 import com.piyush.phonebridge.filter.DedupCache
 import com.piyush.phonebridge.filter.NotificationFilter
 import com.piyush.phonebridge.model.RelayNotification
+import com.piyush.phonebridge.net.HostResolver
 import com.piyush.phonebridge.net.MacClient
-import com.piyush.phonebridge.net.MacDiscovery
 import com.piyush.phonebridge.pairing.PairingStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -31,6 +31,7 @@ class NotificationRelayService : NotificationListenerService() {
 
     private var client: MacClient? = null
     private var clientToken: String? = null
+    private val resolver by lazy { HostResolver(this) }
 
     override fun onDestroy() {
         scope.cancel()
@@ -96,9 +97,18 @@ class NotificationRelayService : NotificationListenerService() {
             if (!store.isPaired) return@launch
 
             val macClient = clientFor(store) ?: return@launch
-            val host = store.host ?: return@launch
             val body = JSONObject().put("key", sbn.key).toString()
-            macClient.postDismiss(host, store.port, body)
+            val host = store.host
+            val result = if (host != null) {
+                macClient.postDismiss(host, store.port, body)
+            } else {
+                MacClient.SendResult.Failed("no cached host")
+            }
+            if (result is MacClient.SendResult.Failed) {
+                resolver.rediscover(store)?.let { (newHost, newPort) ->
+                    macClient.postDismiss(newHost, newPort, body)
+                }
+            }
         }
     }
 
@@ -125,15 +135,13 @@ class NotificationRelayService : NotificationListenerService() {
         }
 
         if (result is MacClient.SendResult.Failed) {
-            val rediscovered = MacDiscovery(this@NotificationRelayService).discover()
+            val rediscovered = resolver.rediscover(store)
             if (rediscovered == null) {
                 SendLog.add(n.appName, n.title, "dropped: Mac not found")
                 return
             }
             host = rediscovered.first
             port = rediscovered.second
-            store.host = host
-            store.port = port
             result = macClient.postNotify(host, port, body)
         }
 
@@ -168,8 +176,7 @@ class NotificationRelayService : NotificationListenerService() {
     private suspend fun handleCall(n: RelayNotification, store: PairingStore) {
         val caller = n.title.ifBlank { n.text.ifBlank { "Unknown caller" } }
         val macClient = clientFor(store)
-        val host = store.host
-        if (macClient == null || host == null) {
+        if (macClient == null) {
             SendLog.add("Call", caller, "call dropped: not paired")
             activeCallKeys.remove(n.key)
             return
@@ -181,8 +188,22 @@ class NotificationRelayService : NotificationListenerService() {
             .put("caller", caller)
             .put("postedAt", n.postedAt)
             .toString()
-        val posted = macClient.postCall(host, store.port, callBody)
+        var host = store.host
+        var port = store.port
+        var posted = if (host != null) {
+            macClient.postCall(host, port, callBody)
+        } else {
+            MacClient.SendResult.Failed("no cached host")
+        }
         if (posted !is MacClient.SendResult.Ok) {
+            val rediscovered = resolver.rediscover(store)
+            if (rediscovered != null) {
+                host = rediscovered.first
+                port = rediscovered.second
+                posted = macClient.postCall(host, port, callBody)
+            }
+        }
+        if (posted !is MacClient.SendResult.Ok || host == null) {
             SendLog.add("Call", caller, "call dropped: Mac unreachable")
             activeCallKeys.remove(n.key)
             return
@@ -191,7 +212,7 @@ class NotificationRelayService : NotificationListenerService() {
         SendLog.add("Call", caller, "ringing on Mac")
 
         val waitBody = JSONObject().put("key", n.key).toString()
-        when (val wait = macClient.postCallWait(host, store.port, waitBody)) {
+        when (val wait = macClient.postCallWait(host, port, waitBody)) {
             is MacClient.WaitResult.Action -> when (wait.action) {
                 "answer" -> SendLog.add(
                     "Call", caller, CallControl.answer(this@NotificationRelayService))

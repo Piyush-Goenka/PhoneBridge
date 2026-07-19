@@ -31,13 +31,22 @@ public final class BridgeServer {
                     .flatMap { channel.pipeline.addHandler(HTTPHandler(handler: handler)) }
             }
 
-        do {
-            channel = try bootstrap.bind(host: "0.0.0.0", port: preferredPort).wait()
-        } catch {
-            if let ioError = error as? IOError, ioError.errnoCode == EADDRINUSE {
-                channel = try bootstrap.bind(host: "0.0.0.0", port: 0).wait()
-            } else {
-                throw error
+        // The port is part of the pairing contract: the phone's subnet
+        // sweep knocks on exactly this port, so a silent fallback to a
+        // random port would make the Mac unfindable. Retry briefly (the
+        // usual squatter is a stale instance still shutting down), then
+        // fail loudly.
+        var attempt = 0
+        while true {
+            do {
+                channel = try bootstrap.bind(host: "0.0.0.0", port: preferredPort).wait()
+                break
+            } catch {
+                attempt += 1
+                guard let ioError = error as? IOError,
+                      ioError.errnoCode == EADDRINUSE,
+                      attempt < 3 else { throw error }
+                Thread.sleep(forTimeInterval: 0.2)
             }
         }
         port = channel?.localAddress?.port ?? 0

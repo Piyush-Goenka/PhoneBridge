@@ -4,12 +4,8 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import java.security.MessageDigest
 import java.security.cert.CertificateException
-import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
-import javax.net.ssl.SSLContext
-import javax.net.ssl.X509TrustManager
 
 class MacClient(private val token: String, fingerprintHex: String) {
 
@@ -28,29 +24,9 @@ class MacClient(private val token: String, fingerprintHex: String) {
     private val client: OkHttpClient
 
     init {
-        val pin = fingerprintHex.lowercase()
-        val trustManager = object : X509TrustManager {
-            override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {
-                throw CertificateException("client certificates not supported")
-            }
-
-            override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {
-                val leaf = chain.firstOrNull()
-                    ?: throw CertificateException("empty certificate chain")
-                val fp = MessageDigest.getInstance("SHA-256").digest(leaf.encoded)
-                    .joinToString("") { "%02x".format(it) }
-                if (fp != pin) {
-                    throw CertificateException("certificate fingerprint mismatch, re-pair needed")
-                }
-            }
-
-            override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
-        }
-        val sslContext = SSLContext.getInstance("TLS").apply {
-            init(null, arrayOf(trustManager), null)
-        }
+        val trustManager = PinnedTls.trustManager(fingerprintHex)
         client = OkHttpClient.Builder()
-            .sslSocketFactory(sslContext.socketFactory, trustManager)
+            .sslSocketFactory(PinnedTls.socketFactory(trustManager), trustManager)
             .hostnameVerifier { _, _ -> true }
             .connectTimeout(3, TimeUnit.SECONDS)
             .readTimeout(3, TimeUnit.SECONDS)

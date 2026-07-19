@@ -77,21 +77,18 @@ final class ServerIntegrationTests: XCTestCase {
         XCTAssertGreaterThan(server.port, 0)
     }
 
-    func testFallsBackToEphemeralPortWhenPreferredTaken() throws {
+    func testThrowsWhenPreferredPortTaken() throws {
         let info = try Pairing.ensure(directory: dir)
-        let secondSink = MockSink()
         let secondHandler = RequestHandler(
             token: info.token,
             icons: try DiskIconStore(directory: dir.appendingPathComponent("icons")),
-            sink: secondSink,
+            sink: MockSink(),
             calls: CallActionRegistry(),
             callSink: MockCallSink())
         let secondServer = BridgeServer()
         defer { secondServer.stop() }
-        try secondServer.start(
+        XCTAssertThrowsError(try secondServer.start(
             certPath: info.certPath, keyPath: info.keyPath,
-            handler: secondHandler, preferredPort: server.port)
-        XCTAssertGreaterThan(secondServer.port, 0)
-        XCTAssertNotEqual(secondServer.port, server.port)
+            handler: secondHandler, preferredPort: server.port))
     }
 }
