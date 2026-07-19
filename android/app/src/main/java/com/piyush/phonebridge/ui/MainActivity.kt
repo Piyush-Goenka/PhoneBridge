@@ -13,14 +13,29 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.core.app.NotificationManagerCompat
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
+import com.piyush.phonebridge.net.HostResolver
+import com.piyush.phonebridge.net.SweepProber
 import com.piyush.phonebridge.pairing.PairingStore
 import com.piyush.phonebridge.pairing.QrPayload
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
 
     private lateinit var store: PairingStore
     private val paired = mutableStateOf(false)
     private val accessGranted = mutableStateOf(false)
+
+    // null while a check is running (or nothing is paired), then the result
+    // of actually knocking on the Mac's port with the pinned certificate.
+    private val macReachable = mutableStateOf<Boolean?>(null)
+    private val uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private var reachabilityJob: Job? = null
 
     private val scanLauncher = registerForActivityResult(ScanContract()) { result ->
         val contents = result.contents ?: return@registerForActivityResult
@@ -72,6 +87,7 @@ class MainActivity : ComponentActivity() {
                     store = store,
                     paired = paired,
                     accessGranted = accessGranted,
+                    macReachable = macReachable,
                     onEnableAccess = {
                         startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
                     },
@@ -81,7 +97,8 @@ class MainActivity : ComponentActivity() {
                                 .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
                                 .setPrompt("Scan the QR from the Mac menu bar app")
                                 .setBeepEnabled(false)
-                                .setOrientationLocked(true))
+                                .setOrientationLocked(true)
+                                .setCaptureActivity(PortraitCaptureActivity::class.java))
                     },
                     onMirrorCalls = ::onMirrorCallsChanged,
                 )
@@ -95,5 +112,33 @@ class MainActivity : ComponentActivity() {
         accessGranted.value = NotificationManagerCompat
             .getEnabledListenerPackages(this)
             .contains(packageName)
+        checkMacReachable()
+    }
+
+    override fun onDestroy() {
+        uiScope.cancel()
+        super.onDestroy()
+    }
+
+    // A foreground, user-initiated probe: knock on the cached address with
+    // the pinned certificate; if that fails, let the resolver heal the cache
+    // (mDNS, then the guarded subnet sweep) and verify whatever it finds.
+    private fun checkMacReachable() {
+        reachabilityJob?.cancel()
+        macReachable.value = null
+        if (!store.isPaired) return
+        val fingerprint = store.fingerprint ?: return
+        reachabilityJob = uiScope.launch {
+            val reachable = withContext(Dispatchers.IO) {
+                val prober = SweepProber(fingerprint)
+                val cachedHit = store.host?.let {
+                    prober.findMac(listOf(it), store.port) != null
+                } ?: false
+                cachedHit || HostResolver(this@MainActivity).rediscover(store)
+                    ?.let { (host, port) -> prober.findMac(listOf(host), port) != null }
+                    ?: false
+            }
+            macReachable.value = reachable
+        }
     }
 }

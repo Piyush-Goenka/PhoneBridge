@@ -47,6 +47,7 @@ fun HomeTab(
     store: PairingStore,
     paired: MutableState<Boolean>,
     accessGranted: MutableState<Boolean>,
+    macReachable: MutableState<Boolean?>,
     onEnableAccess: () -> Unit,
     onScanQr: () -> Unit,
     onMirrorCalls: (Boolean) -> Unit,
@@ -100,6 +101,15 @@ fun HomeTab(
                     ok = accessGranted.value,
                     text = if (accessGranted.value) "Notification access granted"
                     else "Notification access needed")
+                if (paired.value) {
+                    StatusLine(
+                        ok = macReachable.value,
+                        text = when (macReachable.value) {
+                            true -> "Mac reachable now"
+                            false -> "Mac not reachable right now"
+                            null -> "Checking if the Mac is reachable"
+                        })
+                }
             }
         }
 
@@ -173,14 +183,17 @@ fun SectionLabel(text: String) {
 }
 
 @Composable
-private fun StatusLine(ok: Boolean, text: String) {
+private fun StatusLine(ok: Boolean?, text: String) {
+    val dot = when (ok) {
+        true -> Brand.emerald
+        false -> Brand.amber
+        null -> Color(0xFFB8B8B2)
+    }
     Row(verticalAlignment = Alignment.CenterVertically) {
         Box(
             modifier = Modifier
                 .size(9.dp)
-                .background(
-                    if (ok) Brand.emerald else Brand.amber,
-                    CircleShape))
+                .background(dot, CircleShape))
         Spacer(Modifier.size(10.dp))
         Text(text, style = MaterialTheme.typography.bodyMedium)
     }

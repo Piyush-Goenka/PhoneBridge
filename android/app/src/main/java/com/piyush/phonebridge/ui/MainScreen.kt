@@ -50,6 +50,7 @@ fun MainScreen(
     store: PairingStore,
     paired: MutableState<Boolean>,
     accessGranted: MutableState<Boolean>,
+    macReachable: MutableState<Boolean?>,
     onEnableAccess: () -> Unit,
     onScanQr: () -> Unit,
     onMirrorCalls: (Boolean) -> Unit,
@@ -92,6 +93,7 @@ fun MainScreen(
                     store = store,
                     paired = paired,
                     accessGranted = accessGranted,
+                    macReachable = macReachable,
                     onEnableAccess = onEnableAccess,
                     onScanQr = onScanQr,
                     onMirrorCalls = onMirrorCalls)
