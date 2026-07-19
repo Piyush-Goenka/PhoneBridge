@@ -11,62 +11,93 @@ import androidx.core.content.ContextCompat
 
 object CallControl {
 
+    // ok distinguishes "the phone actually did it" from "declined or
+    // skipped", which is what decides whether the Mac card changes state.
+    data class Result(val ok: Boolean, val message: String)
+
     private var savedRingerMode: Int? = null
 
     private fun granted(context: Context, permission: String) =
         ContextCompat.checkSelfPermission(context, permission) ==
             PackageManager.PERMISSION_GRANTED
 
-    fun isRinging(context: Context): Boolean {
-        if (!granted(context, Manifest.permission.READ_PHONE_STATE)) return false
+    private fun callState(context: Context): Int? {
+        if (!granted(context, Manifest.permission.READ_PHONE_STATE)) return null
         val telephony =
             context.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
         @Suppress("DEPRECATION")
-        return telephony.callState == TelephonyManager.CALL_STATE_RINGING
+        return telephony.callState
     }
 
-    fun answer(context: Context): String {
+    fun isRinging(context: Context): Boolean =
+        callState(context) == TelephonyManager.CALL_STATE_RINGING
+
+    // Ringing or connected: the call session is still worth commanding.
+    fun isCallAlive(context: Context): Boolean =
+        callState(context) != TelephonyManager.CALL_STATE_IDLE
+
+    fun answer(context: Context): Result {
         if (!granted(context, Manifest.permission.ANSWER_PHONE_CALLS)) {
-            return "answer failed: no permission"
+            return Result(false, "answer failed: no permission")
         }
-        if (!isRinging(context)) return "answer skipped: not ringing"
+        if (!isRinging(context)) return Result(false, "answer skipped: not ringing")
         val telecom = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
         return try {
             @Suppress("DEPRECATION")
             telecom.acceptRingingCall()
-            "call answered"
+            Result(true, "call answered")
         } catch (e: SecurityException) {
-            "answer failed"
+            Result(false, "answer failed")
         }
     }
 
-    fun reject(context: Context): String {
+    fun reject(context: Context): Result {
         if (!granted(context, Manifest.permission.ANSWER_PHONE_CALLS)) {
-            return "reject failed: no permission"
+            return Result(false, "reject failed: no permission")
         }
-        if (!isRinging(context)) return "reject skipped: not ringing"
+        if (!isRinging(context)) return Result(false, "reject skipped: not ringing")
+        return if (endCall(context)) {
+            Result(true, "call rejected")
+        } else {
+            Result(false, "reject failed")
+        }
+    }
+
+    // Hangs up a call that is already connected (the Mac's End call button).
+    fun hangUp(context: Context): Result {
+        if (!granted(context, Manifest.permission.ANSWER_PHONE_CALLS)) {
+            return Result(false, "end failed: no permission")
+        }
+        if (!isCallAlive(context)) return Result(false, "end skipped: no active call")
+        return if (endCall(context)) {
+            Result(true, "call ended")
+        } else {
+            Result(false, "end failed")
+        }
+    }
+
+    private fun endCall(context: Context): Boolean {
         val telecom = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
-        @Suppress("DEPRECATION")
-        val ended = try {
+        return try {
+            @Suppress("DEPRECATION")
             telecom.endCall()
         } catch (e: SecurityException) {
             false
         }
-        return if (ended) "call rejected" else "reject failed"
     }
 
     @Synchronized
-    fun silence(context: Context): String {
+    fun silence(context: Context): Result {
         val notifications =
             context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (!notifications.isNotificationPolicyAccessGranted) {
-            return "silence failed: no DND access"
+            return Result(false, "silence failed: no DND access")
         }
-        if (!isRinging(context)) return "silence skipped: not ringing"
+        if (!isRinging(context)) return Result(false, "silence skipped: not ringing")
         val audio = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         if (savedRingerMode == null) savedRingerMode = audio.ringerMode
         audio.ringerMode = AudioManager.RINGER_MODE_SILENT
-        return "ringer silenced"
+        return Result(true, "ringer silenced")
     }
 
     @Synchronized

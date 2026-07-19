@@ -26,7 +26,9 @@ final class ScreenStack {
         relayout()
     }
 
-    private func relayout() {
+    // A card whose content changed size (the call panel swapping to its
+    // in-call layout) needs the stack re-flowed around it.
+    func relayout() {
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         let area = screen.visibleFrame
         var top = area.maxY - 16

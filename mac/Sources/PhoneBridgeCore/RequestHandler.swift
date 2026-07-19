@@ -25,6 +25,17 @@ public struct CallPayload: Codable {
     public let key: String
     public let caller: String
     public let postedAt: Int64
+    // true marks a caller-name refresh for an already-shown call; absent
+    // (old phones) means a new call.
+    public let update: Bool?
+    // "active" (answered from the Mac) or "silenced"; absent means neither.
+    public let state: String?
+}
+
+// How the phone reports a call has changed while its card is up.
+public enum CallState: String {
+    case active
+    case silenced
 }
 
 public struct CallWaitPayload: Codable {
@@ -47,6 +58,8 @@ public protocol NotificationSink {
 
 public protocol CallSink {
     func showCall(key: String, caller: String)
+    func updateCall(key: String, caller: String)
+    func setCallState(key: String, state: CallState)
     func endCall(key: String)
 }
 
@@ -98,14 +111,20 @@ public final class RequestHandler {
                 return HandlerResult(status: 400, body: #"{"error":"bad json"}"#)
             }
             sink.dismiss(key: payload.key)
-            calls.fulfill(key: payload.key, action: .none)
+            calls.cancel(key: payload.key)
             callSink.endCall(key: payload.key)
             return HandlerResult(status: 200, body: "{}")
         case "/call":
             guard let payload = try? JSONDecoder().decode(CallPayload.self, from: body) else {
                 return HandlerResult(status: 400, body: #"{"error":"bad json"}"#)
             }
-            callSink.showCall(key: payload.key, caller: payload.caller)
+            if let raw = payload.state, let state = CallState(rawValue: raw) {
+                callSink.setCallState(key: payload.key, state: state)
+            } else if payload.update == true {
+                callSink.updateCall(key: payload.key, caller: payload.caller)
+            } else {
+                callSink.showCall(key: payload.key, caller: payload.caller)
+            }
             return HandlerResult(status: 200, body: "{}")
         default:
             return HandlerResult(status: 404, body: #"{"error":"not found"}"#)

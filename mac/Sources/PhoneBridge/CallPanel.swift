@@ -10,14 +10,45 @@ final class CallPanelController: NSObject, CallSink {
     var onAction: ((String, CallAction) -> Void)?
 
     // Main-thread only.
-    private var panels: [String: NSPanel] = [:]
+    private struct Session {
+        let panel: NSPanel
+        var caller: String
+        var state: CallState?
+    }
+    private var sessions: [String: Session] = [:]
 
-    // Matches the CallActionRegistry timeout so the panel never outlives the
-    // window in which a click can still reach the phone.
-    private let visibleFor: TimeInterval = 45
+    // A ringing card outlives the ring itself only as a safety net: the real
+    // close comes from the phone's /dismiss. Once the call is answered it can
+    // last as long as the call does, so the net moves far out.
+    private let ringingSafetyNet: TimeInterval = 180
+    private let inCallSafetyNet: TimeInterval = 4 * 60 * 60
 
     func showCall(key: String, caller: String) {
         DispatchQueue.main.async { self.present(key: key, caller: caller) }
+    }
+
+    // Caller-name correction while the same call is still ringing: swap the
+    // text on the existing panel. No new sound, no timer reset, no restack.
+    func updateCall(key: String, caller: String) {
+        DispatchQueue.main.async {
+            guard var session = self.sessions[key] else { return }
+            session.caller = caller
+            self.sessions[key] = session
+            self.refresh(key: key)
+        }
+    }
+
+    // The phone confirmed the call went active (answered from here) or that
+    // its ringer is now silenced. Only the phone can tell us this, so the
+    // card never claims something that did not actually happen.
+    func setCallState(key: String, state: CallState) {
+        DispatchQueue.main.async {
+            guard var session = self.sessions[key] else { return }
+            session.state = state
+            self.sessions[key] = session
+            self.refresh(key: key)
+            if state == .active { self.armSafetyNet(key: key, after: self.inCallSafetyNet) }
+        }
     }
 
     func endCall(key: String) {
@@ -27,60 +58,101 @@ final class CallPanelController: NSObject, CallSink {
     private func present(key: String, caller: String) {
         close(key: key)
 
-        let view = CallPanelView(
-            caller: caller,
-            onAnswer: { [weak self] in self?.finish(key: key, action: .answer) },
-            onSilence: { [weak self] in self?.finish(key: key, action: .silence) },
-            onReject: { [weak self] in self?.finish(key: key, action: .reject) })
-        let hosting = NSHostingView(rootView: view)
+        let hosting = NSHostingView(rootView: CallPanelView(caller: caller, state: nil))
         let size = hosting.fittingSize
         hosting.frame = NSRect(origin: .zero, size: size)
 
         let panel = makeCardPanel(hosting: hosting)
-        panels[key] = panel
+        sessions[key] = Session(panel: panel, caller: caller, state: nil)
+        refresh(key: key)
         ScreenStack.shared.add(panel, priority: 0)
         panel.orderFrontRegardless()
 
         NSSound(named: "Glass")?.play()
+        armSafetyNet(key: key, after: ringingSafetyNet)
+    }
 
-        let created = panel
-        DispatchQueue.main.asyncAfter(deadline: .now() + visibleFor) { [weak self] in
-            guard let self, self.panels[key] === created else { return }
-            self.close(key: key)
+    private func refresh(key: String) {
+        guard let session = sessions[key],
+              let hosting = session.panel.contentView as? NSHostingView<CallPanelView>
+        else { return }
+        hosting.rootView = CallPanelView(
+            caller: session.caller,
+            state: session.state,
+            onAnswer: { [weak self] in self?.send(key: key, action: .answer) },
+            onSilence: { [weak self] in self?.send(key: key, action: .silence) },
+            onReject: { [weak self] in self?.finish(key: key, action: .reject) },
+            onEnd: { [weak self] in self?.finish(key: key, action: .end) })
+        let size = hosting.fittingSize
+        if size != session.panel.frame.size {
+            hosting.frame = NSRect(origin: .zero, size: size)
+            session.panel.setContentSize(size)
+            ScreenStack.shared.relayout()
         }
     }
 
+    // Answer and Silence leave the call alive, so the card stays: it is the
+    // phone's confirmation (setCallState) that changes what the card shows.
+    private func send(key: String, action: CallAction) {
+        onAction?(key, action)
+    }
+
+    // Reject and End terminate the call, so the card goes immediately rather
+    // than waiting for the phone's /dismiss to make the round trip.
     private func finish(key: String, action: CallAction) {
         onAction?(key, action)
         close(key: key)
     }
 
+    private func armSafetyNet(key: String, after delay: TimeInterval) {
+        let panel = sessions[key]?.panel
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, let current = self.sessions[key]?.panel, current === panel else {
+                return
+            }
+            self.close(key: key)
+        }
+    }
+
     private func close(key: String) {
-        guard let panel = panels.removeValue(forKey: key) else { return }
-        ScreenStack.shared.remove(panel)
-        panel.close()
+        guard let session = sessions.removeValue(forKey: key) else { return }
+        ScreenStack.shared.remove(session.panel)
+        session.panel.close()
     }
 }
 
 struct CallPanelView: View {
     let caller: String
-    let onAnswer: () -> Void
-    let onSilence: () -> Void
-    let onReject: () -> Void
+    // nil while ringing; .silenced still ringing, .active answered from here.
+    let state: CallState?
+    var onAnswer: () -> Void = {}
+    var onSilence: () -> Void = {}
+    var onReject: () -> Void = {}
+    var onEnd: () -> Void = {}
 
     @State private var pulsing = false
+
+    private var isActive: Bool { state == .active }
+
+    private var subtitle: String {
+        switch state {
+        case .active: return "On call, audio is on your phone"
+        case .silenced: return "Ringer silenced, still ringing"
+        case nil: return "Incoming call on your phone"
+        }
+    }
 
     var body: some View {
         HStack(spacing: 14) {
             ZStack {
                 Circle()
-                    .fill(Color.green.opacity(0.9))
+                    .fill((isActive ? Color.accentColor : Color.green).opacity(0.9))
                     .frame(width: 46, height: 46)
-                    .scaleEffect(pulsing ? 1.08 : 1.0)
+                    .scaleEffect(pulsing && !isActive ? 1.08 : 1.0)
                     .animation(
                         .easeInOut(duration: 0.7).repeatForever(autoreverses: true),
                         value: pulsing)
-                Image(systemName: "phone.fill")
+                Image(systemName: isActive ? "waveform" : "phone.fill")
                     .font(.system(size: 20, weight: .semibold))
                     .foregroundStyle(.white)
             }
@@ -90,7 +162,7 @@ struct CallPanelView: View {
                 Text(caller)
                     .font(.headline)
                     .lineLimit(1)
-                Text("Incoming call on your phone")
+                Text(subtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -98,25 +170,37 @@ struct CallPanelView: View {
             Spacer(minLength: 8)
 
             VStack(spacing: 8) {
-                Button(action: onAnswer) {
-                    Label("Answer", systemImage: "phone.fill")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.green)
+                if isActive {
+                    Button(action: onEnd) {
+                        Label("End call", systemImage: "phone.down.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                } else {
+                    Button(action: onAnswer) {
+                        Label("Answer", systemImage: "phone.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.green)
 
-                Button(action: onReject) {
-                    Label("Reject", systemImage: "phone.down.fill")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
+                    Button(action: onReject) {
+                        Label("Reject", systemImage: "phone.down.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
 
-                Button(action: onSilence) {
-                    Label("Silence", systemImage: "bell.slash.fill")
-                        .frame(maxWidth: .infinity)
+                    Button(action: onSilence) {
+                        Label(
+                            state == .silenced ? "Silenced" : "Silence",
+                            systemImage: "bell.slash.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(state == .silenced)
                 }
-                .buttonStyle(.bordered)
             }
             .frame(width: 116)
         }
@@ -125,6 +209,8 @@ struct CallPanelView: View {
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
         .overlay(
             RoundedRectangle(cornerRadius: 18)
-                .strokeBorder(Color.green.opacity(0.35), lineWidth: 1.5))
+                .strokeBorder(
+                    (isActive ? Color.accentColor : Color.green).opacity(0.35),
+                    lineWidth: 1.5))
     }
 }

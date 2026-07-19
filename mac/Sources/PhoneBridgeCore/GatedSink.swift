@@ -24,6 +24,16 @@ public final class GatedSink: NotificationSink, CallSink {
         callInner.showCall(key: key, caller: caller)
     }
 
+    public func updateCall(key: String, caller: String) {
+        guard enabled, let callInner else { return }
+        callInner.updateCall(key: key, caller: caller)
+    }
+
+    public func setCallState(key: String, state: CallState) {
+        guard enabled, let callInner else { return }
+        callInner.setCallState(key: key, state: state)
+    }
+
     public func endCall(key: String) {
         // Like dismiss, cleanup always flows through even when mirroring is off,
         // so a panel shown before the toggle flipped cannot get stuck.

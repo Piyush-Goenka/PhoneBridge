@@ -19,8 +19,12 @@ final class MockSink: NotificationSink {
 
 final class MockCallSink: CallSink {
     var calls: [(key: String, caller: String)] = []
+    var updated: [(key: String, caller: String)] = []
+    var states: [(key: String, state: CallState)] = []
     var ended: [String] = []
     func showCall(key: String, caller: String) { calls.append((key, caller)) }
+    func updateCall(key: String, caller: String) { updated.append((key, caller)) }
+    func setCallState(key: String, state: CallState) { states.append((key, state)) }
     func endCall(key: String) { ended.append(key) }
 }
 
@@ -120,6 +124,57 @@ final class RequestHandlerTests: XCTestCase {
 
     func testCallMalformedIs400() {
         XCTAssertEqual(post("/call", auth: "Bearer secret", body: "{nope").status, 400)
+    }
+
+    func testCallUpdateRoutesToUpdateNotShow() {
+        let body = #"{"v":1,"key":"c1","caller":"Lattu Chacha","postedAt":0,"update":true}"#
+        let r = post("/call", auth: "Bearer secret", body: body)
+        XCTAssertEqual(r.status, 200)
+        XCTAssertTrue(callSink.calls.isEmpty)
+        XCTAssertEqual(callSink.updated.first?.key, "c1")
+        XCTAssertEqual(callSink.updated.first?.caller, "Lattu Chacha")
+    }
+
+    func testCallWithoutUpdateFlagShowsBanner() {
+        let body = #"{"v":1,"key":"c1","caller":"Manoj","postedAt":0}"#
+        _ = post("/call", auth: "Bearer secret", body: body)
+        XCTAssertEqual(callSink.calls.first?.caller, "Manoj")
+        XCTAssertTrue(callSink.updated.isEmpty)
+    }
+
+    func testCallStateActiveSwitchesPanelToInCall() {
+        let body = #"{"v":1,"key":"c1","caller":"Manoj","postedAt":0,"state":"active"}"#
+        let r = post("/call", auth: "Bearer secret", body: body)
+        XCTAssertEqual(r.status, 200)
+        XCTAssertTrue(callSink.calls.isEmpty)
+        XCTAssertEqual(callSink.states.first?.key, "c1")
+        XCTAssertEqual(callSink.states.first?.state, .active)
+    }
+
+    func testCallStateSilencedMarksPanel() {
+        let body = #"{"v":1,"key":"c1","caller":"Manoj","postedAt":0,"state":"silenced"}"#
+        _ = post("/call", auth: "Bearer secret", body: body)
+        XCTAssertEqual(callSink.states.first?.state, .silenced)
+        XCTAssertTrue(callSink.calls.isEmpty)
+    }
+
+    func testUnknownCallStateFallsBackToShowingTheCall() {
+        let body = #"{"v":1,"key":"c1","caller":"Manoj","postedAt":0,"state":"wat"}"#
+        _ = post("/call", auth: "Bearer secret", body: body)
+        XCTAssertEqual(callSink.calls.first?.caller, "Manoj")
+        XCTAssertTrue(callSink.states.isEmpty)
+    }
+
+    func testCallWaitCanReturnEndAction() {
+        let expectation = expectation(description: "wait")
+        handler.handleAsync(
+            path: "/call/wait", authorization: "Bearer secret",
+            body: Data(#"{"key":"c1"}"#.utf8)) { result in
+            XCTAssertEqual(result.body, #"{"action":"end"}"#)
+            expectation.fulfill()
+        }
+        registry.fulfill(key: "c1", action: .end)
+        wait(for: [expectation], timeout: 2)
     }
 
     func testCallWaitCompletesWhenFulfilled() {

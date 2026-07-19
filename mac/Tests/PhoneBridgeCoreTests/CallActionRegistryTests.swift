@@ -34,6 +34,50 @@ final class CallActionRegistryTests: XCTestCase {
         registry.fulfill(key: "missing", action: .reject)
     }
 
+    // During a long call the phone re-polls every 45 s, so a click can land
+    // in the gap between two waits. It must not be lost.
+    func testActionClickedBetweenWaitsIsDeliveredToTheNextWait() {
+        let registry = CallActionRegistry(timeout: 10)
+        registry.fulfill(key: "k", action: .end)
+        var received: [CallAction] = []
+        registry.register(key: "k") { received.append($0) }
+        XCTAssertEqual(received, [.end])
+    }
+
+    func testBufferedActionIsDeliveredOnlyOnce() {
+        let registry = CallActionRegistry(timeout: 10)
+        registry.fulfill(key: "k", action: .end)
+        registry.register(key: "k") { _ in }
+        var second: [CallAction] = []
+        registry.register(key: "k") { second.append($0) }
+        XCTAssertTrue(second.isEmpty, "buffered action was replayed to a later wait")
+    }
+
+    func testTimeoutIsNotBuffered() {
+        let registry = CallActionRegistry(timeout: 10)
+        registry.fulfill(key: "k", action: .none)
+        var received: [CallAction] = []
+        registry.register(key: "k") { received.append($0) }
+        XCTAssertTrue(received.isEmpty, "a timeout should never be replayed as an action")
+    }
+
+    func testCancelClearsBufferedActionAndPendingWait() {
+        let registry = CallActionRegistry(timeout: 10)
+        registry.fulfill(key: "k", action: .end)
+        registry.cancel(key: "k")
+        var received: [CallAction] = []
+        registry.register(key: "k") { received.append($0) }
+        XCTAssertTrue(received.isEmpty, "stale action survived the call ending")
+    }
+
+    func testCancelFulfillsPendingWaitWithNone() {
+        let registry = CallActionRegistry(timeout: 10)
+        var received: [CallAction] = []
+        registry.register(key: "k") { received.append($0) }
+        registry.cancel(key: "k")
+        XCTAssertEqual(received, [CallAction.none])
+    }
+
     func testStaleTimerDoesNotExpireLaterRegistration() {
         let registry = CallActionRegistry(timeout: 0.5)
         registry.register(key: "k") { _ in }

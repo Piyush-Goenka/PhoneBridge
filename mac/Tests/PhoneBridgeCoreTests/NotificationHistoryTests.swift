@@ -60,6 +60,53 @@ final class NotificationHistoryTests: XCTestCase {
         XCTAssertTrue(entry?.isCall == true)
     }
 
+    func testUpdateCallRewritesCallerInPlace() {
+        let history = NotificationHistory(fileURL: fileURL)
+        history.recordCall(key: "c1", caller: "Manoj")
+        history.record(payload(key: "n1", title: "newer notification"))
+        let originalId = history.entries.first { $0.isCall }?.id
+
+        history.updateCall(key: "c1", caller: "Lattu Chacha")
+
+        XCTAssertEqual(history.entries.count, 2)
+        XCTAssertEqual(history.entries.first?.title, "newer notification")
+        let call = history.entries.first { $0.isCall }
+        XCTAssertEqual(call?.title, "Lattu Chacha")
+        XCTAssertEqual(call?.id, originalId)
+        let reloaded = NotificationHistory(fileURL: fileURL)
+        XCTAssertEqual(reloaded.entries.first { $0.isCall }?.title, "Lattu Chacha")
+    }
+
+    func testUpdateCallWithoutMatchAppendsCallEntry() {
+        let history = NotificationHistory(fileURL: fileURL)
+        history.updateCall(key: "c9", caller: "Mummy")
+        XCTAssertEqual(history.entries.count, 1)
+        XCTAssertTrue(history.entries.first?.isCall == true)
+        XCTAssertEqual(history.entries.first?.title, "Mummy")
+    }
+
+    func testCallHistorySinkForwardsUpdate() {
+        let history = NotificationHistory(fileURL: fileURL)
+        let inner = MockCallSink()
+        let sink = CallHistorySink(wrapping: inner, history: history)
+        sink.showCall(key: "c1", caller: "Manoj")
+        sink.updateCall(key: "c1", caller: "Lattu Chacha")
+        XCTAssertEqual(history.entries.count, 1)
+        XCTAssertEqual(history.entries.first?.title, "Lattu Chacha")
+        XCTAssertEqual(inner.updated.first?.caller, "Lattu Chacha")
+    }
+
+    func testCallHistorySinkForwardsStateAndMarksAnswered() {
+        let history = NotificationHistory(fileURL: fileURL)
+        let inner = MockCallSink()
+        let sink = CallHistorySink(wrapping: inner, history: history)
+        sink.showCall(key: "c1", caller: "Manoj")
+        sink.setCallState(key: "c1", state: .active)
+        XCTAssertEqual(inner.states.first?.state, .active)
+        XCTAssertEqual(history.entries.count, 1)
+        XCTAssertEqual(history.entries.first?.text, "Answered call")
+    }
+
     func testCallHistorySinkRecordsAndForwards() {
         let history = NotificationHistory(fileURL: fileURL)
         let inner = MockCallSink()

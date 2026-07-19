@@ -77,6 +77,49 @@ public final class NotificationHistory {
             kind: "call"))
     }
 
+    // Caller-name correction for a call already recorded: rewrite the newest
+    // matching entry in place (same id, same position) instead of appending
+    // a duplicate. Falls back to a fresh record when nothing matches.
+    public func updateCall(key: String, caller: String) {
+        rewriteCall(key: key) { old in
+            HistoryEntry(
+                id: old.id, key: old.key, appName: old.appName, title: caller,
+                text: old.text, iconHash: old.iconHash, receivedAt: old.receivedAt,
+                kind: old.kind)
+        } ifMissing: {
+            self.recordCall(key: key, caller: caller)
+        }
+    }
+
+    // A call answered from the Mac reads better in history as "Answered call"
+    // than as a bare incoming call.
+    public func markCallAnswered(key: String) {
+        rewriteCall(key: key) { old in
+            HistoryEntry(
+                id: old.id, key: old.key, appName: old.appName, title: old.title,
+                text: "Answered call", iconHash: old.iconHash,
+                receivedAt: old.receivedAt, kind: old.kind)
+        } ifMissing: {}
+    }
+
+    private func rewriteCall(
+        key: String,
+        _ transform: (HistoryEntry) -> HistoryEntry,
+        ifMissing: () -> Void
+    ) {
+        lock.lock()
+        guard let index = stored.firstIndex(where: { $0.key == key && $0.isCall }) else {
+            lock.unlock()
+            ifMissing()
+            return
+        }
+        stored[index] = transform(stored[index])
+        let snapshot = stored
+        lock.unlock()
+        save(snapshot)
+        onChange?(snapshot)
+    }
+
     private func append(_ entry: HistoryEntry) {
         lock.lock()
         stored = Array(([entry] + stored).prefix(cap))
@@ -138,6 +181,16 @@ public final class CallHistorySink: CallSink {
     public func showCall(key: String, caller: String) {
         history.recordCall(key: key, caller: caller)
         inner.showCall(key: key, caller: caller)
+    }
+
+    public func updateCall(key: String, caller: String) {
+        history.updateCall(key: key, caller: caller)
+        inner.updateCall(key: key, caller: caller)
+    }
+
+    public func setCallState(key: String, state: CallState) {
+        if state == .active { history.markCallAnswered(key: key) }
+        inner.setCallState(key: key, state: state)
     }
 
     public func endCall(key: String) {

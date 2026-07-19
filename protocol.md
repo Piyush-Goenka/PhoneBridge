@@ -66,7 +66,26 @@ delivered notification. Unknown keys still return 200.
 {"v":1,"key":"0|com.google.android.dialer|1|null|10","caller":"Palak","postedAt":1768500000000}
 ```
 
-Response `200 {}`. Shows an actionable Incoming Call banner (Reject, Silence) on the Mac.
+Response `200 {}`. Shows an actionable Incoming Call banner (Answer, Reject,
+Silence) on the Mac.
+
+An optional `"update":true` field marks a caller-name refresh for a call
+already shown (the dialer first posts the carrier caller-ID name, then
+re-posts once its contact lookup resolves). On an update the Mac rewrites the
+existing banner and history entry in place: no new sound, no timer reset, no
+new banner. An update whose banner is already gone only touches history.
+Absent or false means a new call.
+
+An optional `"state"` field reports that an already-shown call changed:
+
+- `"active"` — the phone answered (because Answer was clicked on the Mac).
+  The banner switches to its in-call form, offering only **End call**.
+- `"silenced"` — the ringer was muted; the call is still ringing, so the
+  banner stays and marks Silence as done.
+
+The phone sends `state` only after the action actually succeeded, so the Mac
+never claims something the phone did not do. `state` takes precedence over
+`update`; an unknown value is treated as a plain new call.
 
 ### POST /call/wait
 
@@ -74,11 +93,28 @@ Response `200 {}`. Shows an actionable Incoming Call banner (Reject, Silence) on
 {"key":"0|com.google.android.dialer|1|null|10"}
 ```
 
-Held open by the Mac for up to 45 seconds, then `200 {"action":"answer"|"reject"|"silence"|"none"}`.
-The action reflects the button clicked on the Mac banner; `none` means timeout or
-banner dismissed. Clients must use a read timeout of at least 50 seconds for this
-endpoint only. A phone-side `/dismiss` for the same key (ring ended) fulfills any
-pending wait with `none`.
+Held open by the Mac for up to 45 seconds, then
+`200 {"action":"answer"|"reject"|"silence"|"end"|"none"}`. The action reflects the
+button clicked on the Mac banner; `none` means timeout or banner dismissed.
+Clients must use a read timeout of at least 50 seconds for this endpoint only.
+
+A call can take more than one command (Silence then Answer, Answer then End
+call), so the phone **re-issues `/call/wait` in a loop** for as long as the
+call session lives, rather than waiting once. `none` is a poll timeout, not an
+instruction: the phone simply waits again. The loop ends when the call ends,
+or on `reject`/`end`, or when the request fails.
+
+Because the phone re-polls, a click can land in the gap between two waits. The
+Mac holds one such action per key and hands it to the next wait, so a button
+press is never lost. Timeouts are never buffered this way, and `/dismiss`
+clears any unclaimed action so a stale click cannot reach a later call.
+
+A phone-side `/dismiss` for the same key fulfills any pending wait with `none`
+and closes the banner. The phone sends it when the ring ends (dialer
+notification removed) and when the call is answered *on the phone itself*, so
+the Mac banner never outlives its usefulness. A call answered *from the Mac*
+is the exception: it stays on screen, in its in-call form, until the call is
+actually over.
 
 ## Errors
 

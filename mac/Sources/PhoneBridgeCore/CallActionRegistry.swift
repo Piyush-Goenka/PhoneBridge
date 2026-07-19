@@ -4,12 +4,17 @@ public enum CallAction: String {
     case answer
     case reject
     case silence
+    case end
     case none
 }
 
 public final class CallActionRegistry {
     private let lock = NSLock()
     private var pending: [String: (generation: UInt64, completion: (CallAction) -> Void)] = [:]
+    // A call now outlives one 45 s poll, so the phone re-waits repeatedly and
+    // a click can land in the gap between two waits. Hold that action until
+    // the next wait arrives instead of dropping it on the floor.
+    private var buffered: [String: CallAction] = [:]
     private var nextGeneration: UInt64 = 0
     private let timeout: TimeInterval
 
@@ -19,6 +24,13 @@ public final class CallActionRegistry {
 
     public func register(key: String, completion: @escaping (CallAction) -> Void) {
         lock.lock()
+        if let waiting = buffered.removeValue(forKey: key) {
+            let previous = pending.removeValue(forKey: key)?.completion
+            lock.unlock()
+            previous?(.none)
+            completion(waiting)
+            return
+        }
         nextGeneration += 1
         let generation = nextGeneration
         let previous = pending[key]?.completion
@@ -32,9 +44,24 @@ public final class CallActionRegistry {
 
     public func fulfill(key: String, action: CallAction) {
         lock.lock()
-        let completion = pending.removeValue(forKey: key)?.completion
+        if let completion = pending.removeValue(forKey: key)?.completion {
+            lock.unlock()
+            completion(action)
+            return
+        }
+        // A timeout is not a user intent, so it is never replayed later.
+        if action != .none { buffered[key] = action }
         lock.unlock()
-        completion?(action)
+    }
+
+    // The call is over: drop any pending wait and any unclaimed action so a
+    // stale click cannot reach the phone after the fact.
+    public func cancel(key: String) {
+        lock.lock()
+        let completion = pending.removeValue(forKey: key)?.completion
+        buffered.removeValue(forKey: key)
+        lock.unlock()
+        completion?(.none)
     }
 
     private func expire(key: String, generation: UInt64) {

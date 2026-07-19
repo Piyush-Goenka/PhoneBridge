@@ -48,4 +48,26 @@ final class GatedSinkTests: XCTestCase {
         gated.endCall(key: "k")
         XCTAssertEqual(callInner.ended, ["k"])
     }
+
+    func testDropsCallStateWhenDisabled() {
+        let callInner = MockCallSink()
+        let gated = GatedSink(wrapping: MockSink(), calls: callInner)
+        gated.enabled = false
+        gated.setCallState(key: "k", state: .active)
+        XCTAssertTrue(callInner.states.isEmpty)
+        gated.enabled = true
+        gated.setCallState(key: "k", state: .active)
+        XCTAssertEqual(callInner.states.count, 1)
+    }
+
+    func testDropsCallUpdateWhenDisabled() {
+        let callInner = MockCallSink()
+        let gated = GatedSink(wrapping: MockSink(), calls: callInner)
+        gated.enabled = false
+        gated.updateCall(key: "k", caller: "X")
+        XCTAssertTrue(callInner.updated.isEmpty)
+        gated.enabled = true
+        gated.updateCall(key: "k", caller: "X")
+        XCTAssertEqual(callInner.updated.count, 1)
+    }
 }

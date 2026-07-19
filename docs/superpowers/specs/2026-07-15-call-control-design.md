@@ -70,3 +70,51 @@ Both carry the bearer token like every other endpoint.
 ## Out of scope
 
 Answering calls from the Mac, call history, decline-with-SMS, multiple simultaneous calls (only the first active session is tracked; a second incoming call while one session is open is ignored).
+
+## Amendments (2026-07-19)
+
+Field testing surfaced two gaps, both rooted in the same blind spot: the dialer
+updates its one notification key in place, and the original design ignored all
+re-posts of an active session's key.
+
+1. **Ring end on answer.** Answering on the phone does not remove the dialer's
+   notification, it morphs into the ongoing-call notification (same key), so
+   no `/dismiss` fired and the Mac card lingered until the call ended or the
+   45 s window expired. Now a re-post of the active key while telephony is no
+   longer RINGING is treated as "answered on the phone": the phone sends
+   `/dismiss` (closing the card and fulfilling the pending wait with `none`),
+   restores the ringer if Silence had muted it, and ends the session. Decision
+   logic lives in `CallSessionDecider`, pure and JVM-tested.
+2a. **The card is a session, not a one-shot prompt (2026-07-19, second
+   round).** Originally any button click closed the card and ended the
+   session, which was wrong for two of the three buttons. Silence leaves the
+   call ringing and Answer leaves it connected, so in both cases there is
+   still something to control. Now:
+
+   - **Answer** keeps the card up; once the phone confirms it connected
+     (`/call` `"state":"active"`), the card switches to its in-call form with
+     a single **End call** button (`/call/wait` action `end` →
+     `TelecomManager.endCall()` on the connected call).
+   - **Silence** keeps the card up and marks itself done, confirmed by
+     `"state":"silenced"`; the card lives until the ring is over.
+   - **Reject** and **End call** close the card immediately, since both end
+     the call.
+   - Answering *on the phone* still closes the card: the user is holding the
+     phone, so Mac controls are redundant.
+
+   Consequence for the "command channel dies with the ring" principle: the
+   channel now lives for the whole call, because the phone re-polls
+   `/call/wait` in a loop until the session ends. The phone is awake during a
+   call anyway, so this costs nothing extra in practice, but it is a
+   deliberate widening of the original design and is recorded as such. The
+   Mac buffers one unclaimed action per key so a click landing between two
+   polls is not lost, and the card's auto-close is only a safety net (3 min
+   ringing, 4 h in call); the real close is the phone's `/dismiss`.
+
+2. **Caller-name updates.** The dialer often posts the incoming-call
+   notification first with the carrier/Google caller-ID name and re-posts with
+   the saved contact name once its lookup resolves; the Mac showed whichever
+   won that race. A re-post of the active key while still RINGING with a
+   changed title is now forwarded as `POST /call` with `"update":true`; the
+   Mac rewrites the banner text and the history entry in place (same panel,
+   same timer, no repeated sound). Names never downgrade to "Unknown caller".
