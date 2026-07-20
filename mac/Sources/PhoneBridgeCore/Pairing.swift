@@ -4,7 +4,9 @@ import Security
 
 public struct PairingInfo {
     public let certPath: URL
-    public let keyPath: URL
+    // The private key lives in the Keychain, not on disk, so it travels as
+    // bytes rather than a file path.
+    public let keyPEM: Data
     public let fingerprint: String
     public let token: String
 }
@@ -12,35 +14,84 @@ public struct PairingInfo {
 public enum PairingError: Error {
     case opensslFailed(Int32)
     case badPEM
+    case randomFailed
 }
 
 public enum Pairing {
-    public static func ensure(directory: URL) throws -> PairingInfo {
+    static let tokenAccount = "pairing-token"
+    static let keyAccount = "tls-private-key"
+
+    public static func ensure(
+        directory: URL, secrets: SecretStore = KeychainSecretStore()
+    ) throws -> PairingInfo {
         let fm = FileManager.default
         try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        // The certificate is public and stays on disk; only the key and token
+        // are secrets moved into the Keychain.
         let certPath = directory.appendingPathComponent("cert.pem")
-        let keyPath = directory.appendingPathComponent("key.pem")
-        let tokenPath = directory.appendingPathComponent("token")
+        let legacyKeyPath = directory.appendingPathComponent("key.pem")
+        let legacyTokenPath = directory.appendingPathComponent("token")
 
-        if !fm.fileExists(atPath: certPath.path) || !fm.fileExists(atPath: keyPath.path) {
-            try generateCert(certPath: certPath, keyPath: keyPath)
-        }
-
-        let token: String
-        if let existing = try? String(contentsOf: tokenPath, encoding: .utf8),
-           !existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            token = existing.trimmingCharacters(in: .whitespacesAndNewlines)
-        } else {
-            token = randomToken()
-            try token.write(to: tokenPath, atomically: true, encoding: .utf8)
-            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tokenPath.path)
-        }
+        let keyPEM = try ensureKey(
+            certPath: certPath, legacyKeyPath: legacyKeyPath, secrets: secrets, fm: fm)
+        let token = try ensureToken(
+            legacyTokenPath: legacyTokenPath, secrets: secrets, fm: fm)
 
         return PairingInfo(
             certPath: certPath,
-            keyPath: keyPath,
+            keyPEM: keyPEM,
             fingerprint: try fingerprint(ofCertAt: certPath),
             token: token)
+    }
+
+    private static func ensureKey(
+        certPath: URL, legacyKeyPath: URL, secrets: SecretStore, fm: FileManager
+    ) throws -> Data {
+        // Cert and key must match, so a stored key is only usable when the
+        // cert it was issued with is still present.
+        if fm.fileExists(atPath: certPath.path), let stored = secrets.data(for: keyAccount) {
+            return stored
+        }
+        // Migration: an earlier build left cert.pem + key.pem on disk. Pull
+        // the key into the Keychain and delete the plaintext copy.
+        if fm.fileExists(atPath: certPath.path),
+           fm.fileExists(atPath: legacyKeyPath.path),
+           let legacy = try? Data(contentsOf: legacyKeyPath) {
+            try secrets.set(legacy, for: keyAccount)
+            try? fm.removeItem(at: legacyKeyPath)
+            return legacy
+        }
+        // Fresh (or unrecoverable) state: generate a new cert + key pair and
+        // keep only the key in the Keychain.
+        let tempKey = certPath.deletingLastPathComponent()
+            .appendingPathComponent("key.tmp.pem")
+        try generateCert(certPath: certPath, keyPath: tempKey)
+        let keyPEM = try Data(contentsOf: tempKey)
+        try secrets.set(keyPEM, for: keyAccount)
+        try? fm.removeItem(at: tempKey)
+        return keyPEM
+    }
+
+    private static func ensureToken(
+        legacyTokenPath: URL, secrets: SecretStore, fm: FileManager
+    ) throws -> String {
+        if let data = secrets.data(for: tokenAccount),
+           let token = String(data: data, encoding: .utf8),
+           !token.isEmpty {
+            return token
+        }
+        // Migration: import a plaintext token file, then delete it.
+        if let existing = try? String(contentsOf: legacyTokenPath, encoding: .utf8) {
+            let trimmed = existing.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                try secrets.set(Data(trimmed.utf8), for: tokenAccount)
+                try? fm.removeItem(at: legacyTokenPath)
+                return trimmed
+            }
+        }
+        let token = try randomToken()
+        try secrets.set(Data(token.utf8), for: tokenAccount)
+        return token
     }
 
     public static func qrPayload(info: PairingInfo, port: Int) -> String {
@@ -180,9 +231,13 @@ public enum Pairing {
         return SHA256.hash(data: der).map { String(format: "%02x", $0) }.joined()
     }
 
-    static func randomToken() -> String {
+    static func randomToken() throws -> String {
         var bytes = [UInt8](repeating: 0, count: 32)
-        _ = SecRandomCopyBytes(kSecRandomDefault, 32, &bytes)
+        // A failure here would leave the buffer all zeros: an attacker-known
+        // token. Refuse to produce one rather than ship a predictable secret.
+        guard SecRandomCopyBytes(kSecRandomDefault, 32, &bytes) == errSecSuccess else {
+            throw PairingError.randomFailed
+        }
         return Data(bytes).base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")

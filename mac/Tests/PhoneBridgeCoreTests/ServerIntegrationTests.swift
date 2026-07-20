@@ -25,7 +25,7 @@ final class ServerIntegrationTests: XCTestCase {
     override func setUpWithError() throws {
         dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("server-tests-" + UUID().uuidString)
-        let info = try Pairing.ensure(directory: dir)
+        let info = try Pairing.ensure(directory: dir, secrets: InMemorySecretStore())
         token = info.token
         sink = MockSink()
         let handler = RequestHandler(
@@ -36,7 +36,7 @@ final class ServerIntegrationTests: XCTestCase {
             callSink: MockCallSink())
         server = BridgeServer()
         try server.start(
-            certPath: info.certPath, keyPath: info.keyPath,
+            certPath: info.certPath, keyPEM: info.keyPEM,
             handler: handler, preferredPort: 0)
         session = URLSession(
             configuration: .ephemeral, delegate: TrustAllDelegate(), delegateQueue: nil)
@@ -78,7 +78,7 @@ final class ServerIntegrationTests: XCTestCase {
     }
 
     func testThrowsWhenPreferredPortTaken() throws {
-        let info = try Pairing.ensure(directory: dir)
+        let info = try Pairing.ensure(directory: dir, secrets: InMemorySecretStore())
         let secondHandler = RequestHandler(
             token: info.token,
             icons: try DiskIconStore(directory: dir.appendingPathComponent("icons")),
@@ -88,7 +88,7 @@ final class ServerIntegrationTests: XCTestCase {
         let secondServer = BridgeServer()
         defer { secondServer.stop() }
         XCTAssertThrowsError(try secondServer.start(
-            certPath: info.certPath, keyPath: info.keyPath,
+            certPath: info.certPath, keyPEM: info.keyPEM,
             handler: secondHandler, preferredPort: server.port))
     }
 
@@ -99,7 +99,7 @@ final class ServerIntegrationTests: XCTestCase {
     private func startEnrollingServer(open: Bool) throws -> (BridgeServer, EnrollmentCoordinator, URL, String) {
         let ownDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("enroll-srv-" + UUID().uuidString)
-        let info = try Pairing.ensure(directory: ownDir)
+        let info = try Pairing.ensure(directory: ownDir, secrets: InMemorySecretStore())
         let certPath = PhoneCertStore.path(directory: ownDir)
         let coordinator = EnrollmentCoordinator(certPath: certPath, open: open)
         let handler = RequestHandler(
@@ -109,7 +109,7 @@ final class ServerIntegrationTests: XCTestCase {
             enroller: coordinator)
         let srv = BridgeServer()
         try srv.start(
-            certPath: info.certPath, keyPath: info.keyPath, handler: handler,
+            certPath: info.certPath, keyPEM: info.keyPEM, handler: handler,
             preferredPort: 0, phoneCertPath: certPath, mode: open ? .open : .locked)
         return (srv, coordinator, certPath, info.token)
     }

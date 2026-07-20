@@ -72,7 +72,7 @@ final class AppState: ObservableObject {
                 self?.showHistoryWindow()
             }
             try server.start(
-                certPath: info.certPath, keyPath: info.keyPath, handler: handler,
+                certPath: info.certPath, keyPEM: info.keyPEM, handler: handler,
                 phoneCertPath: phoneCertPath, mode: launchMode)
             bonjour.publish(port: server.port)
             statusLine = "Listening on port \(server.port)"

@@ -5,6 +5,7 @@ import android.app.NotificationManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioManager
+import android.os.Build
 import android.telecom.TelecomManager
 import android.telephony.TelephonyManager
 import androidx.core.content.ContextCompat
@@ -56,6 +57,7 @@ object CallControl {
             return Result(false, "reject failed: no permission")
         }
         if (!isRinging(context)) return Result(false, "reject skipped: not ringing")
+        if (!canEndCall()) return Result(false, "reject needs Android 9+")
         return if (endCall(context)) {
             Result(true, "call rejected")
         } else {
@@ -69,6 +71,7 @@ object CallControl {
             return Result(false, "end failed: no permission")
         }
         if (!isCallAlive(context)) return Result(false, "end skipped: no active call")
+        if (!canEndCall()) return Result(false, "end needs Android 9+")
         return if (endCall(context)) {
             Result(true, "call ended")
         } else {
@@ -76,7 +79,13 @@ object CallControl {
         }
     }
 
+    // TelecomManager.endCall() only exists on API 28+. minSdk is 26, so on
+    // Android 8/8.1 there is no supported way to hang up; degrade cleanly
+    // instead of crashing with NoSuchMethodError.
+    private fun canEndCall(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+
     private fun endCall(context: Context): Boolean {
+        if (!canEndCall()) return false
         val telecom = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
         return try {
             @Suppress("DEPRECATION")
