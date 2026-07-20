@@ -91,4 +91,94 @@ final class ServerIntegrationTests: XCTestCase {
             certPath: info.certPath, keyPath: info.keyPath,
             handler: secondHandler, preferredPort: server.port))
     }
+
+    // MARK: - Mutual TLS enrollment (finding #4)
+
+    // Spins a dedicated server with an enroller and returns it plus its cert
+    // directory. Ephemeral port keeps it independent of the setUp server.
+    private func startEnrollingServer(open: Bool) throws -> (BridgeServer, EnrollmentCoordinator, URL, String) {
+        let ownDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("enroll-srv-" + UUID().uuidString)
+        let info = try Pairing.ensure(directory: ownDir)
+        let certPath = PhoneCertStore.path(directory: ownDir)
+        let coordinator = EnrollmentCoordinator(certPath: certPath, open: open)
+        let handler = RequestHandler(
+            token: info.token,
+            icons: try DiskIconStore(directory: ownDir.appendingPathComponent("icons")),
+            sink: MockSink(), calls: CallActionRegistry(), callSink: MockCallSink(),
+            enroller: coordinator)
+        let srv = BridgeServer()
+        try srv.start(
+            certPath: info.certPath, keyPath: info.keyPath, handler: handler,
+            preferredPort: 0, phoneCertPath: certPath, mode: open ? .open : .locked)
+        return (srv, coordinator, certPath, info.token)
+    }
+
+    private func sampleClientCertBase64(in ownDir: URL) throws -> String {
+        let cp = ownDir.appendingPathComponent("client-cert-\(UUID().uuidString).pem")
+        let kp = ownDir.appendingPathComponent("client-key-\(UUID().uuidString).pem")
+        try Pairing.generateCert(certPath: cp, keyPath: kp)
+        let pem = try String(contentsOf: cp, encoding: .utf8)
+        let der = pem.components(separatedBy: "\n")
+            .filter { !$0.hasPrefix("-----") && !$0.isEmpty }.joined()
+        // der here is already base64 of the DER, which is exactly the wire form.
+        return der
+    }
+
+    private func post(to port: Int, path: String, auth: String?, body: String) async throws -> (Int, String) {
+        var request = URLRequest(url: URL(string: "https://localhost:\(port)\(path)")!)
+        request.httpMethod = "POST"
+        request.httpBody = Data(body.utf8)
+        if let auth { request.setValue(auth, forHTTPHeaderField: "Authorization") }
+        let (data, response) = try await session.data(for: request)
+        return ((response as! HTTPURLResponse).statusCode, String(data: data, encoding: .utf8) ?? "")
+    }
+
+    func testEnrollAcceptedInOpenMode() async throws {
+        let (srv, _, certPath, token) = try startEnrollingServer(open: true)
+        defer { srv.stop() }
+        let certB64 = try sampleClientCertBase64(in: dir)
+        let body = #"{"v":1,"cert":"\#(certB64)"}"#
+        let (status, _) = try await post(to: srv.port, path: "/enroll", auth: "Bearer \(token)", body: body)
+        XCTAssertEqual(status, 200)
+        XCTAssertNotNil(PhoneCertStore.loadTrustRoot(at: certPath))
+    }
+
+    func testEnrollRejectsMissingToken() async throws {
+        let (srv, _, _, _) = try startEnrollingServer(open: true)
+        defer { srv.stop() }
+        let certB64 = try sampleClientCertBase64(in: dir)
+        let (status, _) = try await post(
+            to: srv.port, path: "/enroll", auth: nil, body: #"{"v":1,"cert":"\#(certB64)"}"#)
+        XCTAssertEqual(status, 401)
+    }
+
+    func testEnrollRejectsBadBase64() async throws {
+        let (srv, _, _, token) = try startEnrollingServer(open: true)
+        defer { srv.stop() }
+        let (status, _) = try await post(
+            to: srv.port, path: "/enroll", auth: "Bearer \(token)", body: #"{"v":1,"cert":"!!!!"}"#)
+        XCTAssertEqual(status, 400)
+    }
+
+    // A no-client-cert session must fail the handshake once the server locks.
+    func testLockedModeRejectsClientWithoutCertificate() async throws {
+        let (srv, _, certPath, token) = try startEnrollingServer(open: true)
+        defer { srv.stop() }
+        let certB64 = try sampleClientCertBase64(in: dir)
+        _ = try await post(
+            to: srv.port, path: "/enroll", auth: "Bearer \(token)", body: #"{"v":1,"cert":"\#(certB64)"}"#)
+        try srv.reload(mode: .locked, phoneCertPath: certPath)
+        XCTAssertEqual(srv.mode, .locked)
+
+        let body = """
+            {"v":1,"key":"k","pkg":"com.x","appName":"X","title":"H","text":"w","postedAt":0,"iconHash":""}
+            """
+        do {
+            _ = try await post(to: srv.port, path: "/notify", auth: "Bearer \(token)", body: body)
+            XCTFail("handshake should have been rejected without a client certificate")
+        } catch {
+            // Expected: TLS handshake failure, no client certificate presented.
+        }
+    }
 }

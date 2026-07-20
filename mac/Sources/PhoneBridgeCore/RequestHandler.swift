@@ -42,6 +42,11 @@ public struct CallWaitPayload: Codable {
     public let key: String
 }
 
+public struct EnrollPayload: Codable {
+    public let v: Int
+    public let cert: String
+}
+
 public struct HandlerResult: Equatable {
     public let status: Int
     public let body: String
@@ -69,16 +74,19 @@ public final class RequestHandler {
     private let sink: NotificationSink
     private let calls: CallActionRegistry
     private let callSink: CallSink
+    private let enroller: PhoneEnroller?
 
     public init(
         token: String, icons: IconStoring, sink: NotificationSink,
-        calls: CallActionRegistry, callSink: CallSink
+        calls: CallActionRegistry, callSink: CallSink,
+        enroller: PhoneEnroller? = nil
     ) {
         self.token = token
         self.icons = icons
         self.sink = sink
         self.calls = calls
         self.callSink = callSink
+        self.enroller = enroller
     }
 
     public func handle(path: String, authorization: String?, body: Data) -> HandlerResult {
@@ -126,6 +134,25 @@ public final class RequestHandler {
                 callSink.showCall(key: payload.key, caller: payload.caller)
             }
             return HandlerResult(status: 200, body: "{}")
+        case "/enroll":
+            guard let enroller else {
+                return HandlerResult(status: 404, body: #"{"error":"not found"}"#)
+            }
+            guard let payload = try? JSONDecoder().decode(EnrollPayload.self, from: body),
+                  payload.v == 1,
+                  let der = Data(base64Encoded: payload.cert) else {
+                return HandlerResult(status: 400, body: #"{"error":"bad json"}"#)
+            }
+            switch enroller.enroll(certDer: der) {
+            case .accepted:
+                return HandlerResult(status: 200, body: "{}")
+            case .locked:
+                return HandlerResult(status: 403, body: #"{"error":"locked"}"#)
+            case .invalid:
+                return HandlerResult(status: 400, body: #"{"error":"bad cert"}"#)
+            case .failed:
+                return HandlerResult(status: 500, body: #"{"error":"store failed"}"#)
+            }
         default:
             return HandlerResult(status: 404, body: #"{"error":"not found"}"#)
         }

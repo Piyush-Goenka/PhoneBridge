@@ -9,6 +9,7 @@ import android.util.Base64
 import com.piyush.phonebridge.filter.DedupCache
 import com.piyush.phonebridge.filter.NotificationFilter
 import com.piyush.phonebridge.model.RelayNotification
+import com.piyush.phonebridge.net.Enrollment
 import com.piyush.phonebridge.net.HostResolver
 import com.piyush.phonebridge.net.MacClient
 import com.piyush.phonebridge.pairing.PairingStore
@@ -183,6 +184,9 @@ class NotificationRelayService : NotificationListenerService() {
 
         when (result) {
             is MacClient.SendResult.Ok -> {
+                // The address just worked, so this is the moment to hand the
+                // Mac our client certificate (once) and let it lock to mTLS.
+                Enrollment.ensure(store, macClient, host!!, port)
                 deliveredKeys.add(n.key)
                 if (deliveredKeys.size > 200) {
                     synchronized(deliveredKeys) {
@@ -243,6 +247,7 @@ class NotificationRelayService : NotificationListenerService() {
             activeCalls.remove(n.key)
             return
         }
+        Enrollment.ensure(store, macClient, host, port)
         deliveredKeys.add(n.key)
         SendLog.add("Call", caller, "ringing on Mac")
         commandLoop(n.key, caller, host, port, macClient)

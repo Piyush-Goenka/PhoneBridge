@@ -18,6 +18,8 @@ class SweepProber(
     private val handshakeTimeoutMs: Int = 2_000,
     private val concurrency: Int = 64,
 ) {
+    // Presents the phone's client certificate too, so a probe still completes
+    // the handshake once the Mac has locked to mutual TLS.
     private val socketFactory =
         PinnedTls.socketFactory(PinnedTls.trustManager(fingerprintHex))
 

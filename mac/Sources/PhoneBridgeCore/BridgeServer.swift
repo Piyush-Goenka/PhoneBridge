@@ -4,29 +4,63 @@ import NIOPosix
 import NIOHTTP1
 import NIOSSL
 
+public enum ServerMode: Equatable {
+    case open      // pairing possible: no client cert requested
+    case locked    // steady state: mutual TLS, only the enrolled phone gets in
+}
+
 public final class BridgeServer {
     private let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     private var channel: Channel?
     public private(set) var port: Int = 0
 
+    // Retained so a mode switch can rebind the same listener with a new TLS
+    // context without the caller re-supplying everything.
+    private var certPath: URL?
+    private var keyPath: URL?
+    private var handler: RequestHandler?
+    private var preferredPort = 52735
+    private var phoneCertPath: URL?
+    public private(set) var mode: ServerMode = .open
+
     public init() {}
 
     public func start(
         certPath: URL, keyPath: URL,
-        handler: RequestHandler, preferredPort: Int = 52735
+        handler: RequestHandler, preferredPort: Int = 52735,
+        phoneCertPath: URL? = nil, mode: ServerMode = .open
     ) throws {
-        let certs = try NIOSSLCertificate.fromPEMFile(certPath.path)
-            .map { NIOSSLCertificateSource.certificate($0) }
-        let key = try NIOSSLPrivateKey(file: keyPath.path, format: .pem)
-        let tls = TLSConfiguration.makeServerConfiguration(
-            certificateChain: certs, privateKey: .privateKey(key))
-        let sslContext = try NIOSSLContext(configuration: tls)
+        self.certPath = certPath
+        self.keyPath = keyPath
+        self.handler = handler
+        self.preferredPort = preferredPort
+        self.phoneCertPath = phoneCertPath
+        try bind(mode: mode)
+    }
+
+    // Restart the listener with the other TLS context. The port is fixed and
+    // SO_REUSEADDR is set, so the EADDRINUSE retry loop absorbs the brief
+    // overlap. In-flight requests are short except /call/wait, which the
+    // phone already treats as retryable.
+    public func reload(mode: ServerMode, phoneCertPath: URL?) throws {
+        self.phoneCertPath = phoneCertPath
+        stop()
+        try bind(mode: mode)
+    }
+
+    private func bind(mode requested: ServerMode) throws {
+        guard let handler else { return }
+
+        let sslContext = try makeContext(mode: requested)
 
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
+                // The source gate runs before TLS: an internet-routed peer is
+                // closed before it can start a handshake.
                 channel.pipeline
-                    .addHandler(NIOSSLServerHandler(context: sslContext))
+                    .addHandler(SourceGateHandler())
+                    .flatMap { channel.pipeline.addHandler(NIOSSLServerHandler(context: sslContext)) }
                     .flatMap { channel.pipeline.configureHTTPServerPipeline() }
                     .flatMap { channel.pipeline.addHandler(HTTPHandler(handler: handler)) }
             }
@@ -50,11 +84,54 @@ public final class BridgeServer {
             }
         }
         port = channel?.localAddress?.port ?? 0
+        // Locked was requested but no usable phone cert exists: degrade to
+        // open so the phone can (re-)enroll instead of being locked out.
+        mode = (requested == .locked
+            && phoneCertPath.flatMap { PhoneCertStore.loadTrustRoot(at: $0) } != nil)
+            ? .locked : .open
+    }
+
+    private func makeContext(mode: ServerMode) throws -> NIOSSLContext {
+        guard let certPath, let keyPath else { throw PairingError.badPEM }
+        let certs = try NIOSSLCertificate.fromPEMFile(certPath.path)
+            .map { NIOSSLCertificateSource.certificate($0) }
+        let key = try NIOSSLPrivateKey(file: keyPath.path, format: .pem)
+        var tls = TLSConfiguration.makeServerConfiguration(
+            certificateChain: certs, privateKey: .privateKey(key))
+        // TLS 1.0/1.1 are obsolete; the phone client speaks 1.2+.
+        tls.minimumTLSVersion = .tlsv12
+
+        if mode == .locked,
+           let phoneCertPath,
+           let phoneCert = PhoneCertStore.loadTrustRoot(at: phoneCertPath) {
+            // Require the peer to present the enrolled certificate and prove
+            // possession of its key. NIOSSL sets SSL_VERIFY_FAIL_IF_NO_PEER_CERT
+            // for any verification mode other than .none, so a client with no
+            // cert (or a different one) is dropped at the handshake.
+            tls.certificateVerification = .noHostnameVerification
+            tls.trustRoots = .certificates([phoneCert])
+        }
+        return try NIOSSLContext(configuration: tls)
     }
 
     public func stop() {
         try? channel?.close().wait()
         channel = nil
+    }
+}
+
+// Drops connections from anything that is not loopback / private / VPN before
+// the TLS handler ever sees a byte. Rejection is silent: a scanner learns
+// only that the port refused, not what runs behind it.
+final class SourceGateHandler: ChannelInboundHandler {
+    typealias InboundIn = ByteBuffer
+
+    func channelActive(context: ChannelHandlerContext) {
+        if let remote = context.remoteAddress, PrivateAddress.isAllowed(remote) {
+            context.fireChannelActive()
+        } else {
+            context.close(promise: nil)
+        }
     }
 }
 

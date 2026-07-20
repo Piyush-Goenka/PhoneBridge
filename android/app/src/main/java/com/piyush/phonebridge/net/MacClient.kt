@@ -50,6 +50,9 @@ class MacClient(private val token: String, fingerprintHex: String) {
     fun postCall(host: String, port: Int, json: String): SendResult =
         post(host, port, "/call", json)
 
+    fun postEnroll(host: String, port: Int, json: String): SendResult =
+        post(host, port, "/enroll", json)
+
     fun postCallWait(host: String, port: Int, json: String): WaitResult {
         val request = Request.Builder()
             .url("https://$host:$port/call/wait")

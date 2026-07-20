@@ -26,12 +26,20 @@ final class AppState: ObservableObject {
     private var historyWindow: NSWindow?
     private var pathMonitor: NWPathMonitor?
     private var lastKnownIPv4: String?
+    private var enrollment: EnrollmentCoordinator?
+    private let phoneCertPath: URL
 
     init() {
         let dir = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("PhoneBridge")
-        history = NotificationHistory(fileURL: dir.appendingPathComponent("history.json"))
+        phoneCertPath = PhoneCertStore.path(directory: dir)
+        // Encrypt history at rest with a Keychain-held key; fall back to
+        // plaintext only if the Keychain is somehow unavailable, so history
+        // still works rather than vanishing.
+        let cipher: HistoryCipher = (try? KeychainHistoryCipher()) ?? PlaintextHistoryCipher()
+        history = NotificationHistory(
+            fileURL: dir.appendingPathComponent("history.json"), cipher: cipher)
         gate = GatedSink(
             wrapping: HistorySink(wrapping: notificationCards, history: history),
             calls: CallHistorySink(wrapping: callPanel, history: history))
@@ -44,16 +52,28 @@ final class AppState: ObservableObject {
             pairing = info
             let icons = try DiskIconStore(directory: dir.appendingPathComponent("icons"))
             iconStore = icons
+            // Locked at launch once a phone has enrolled; open until then so a
+            // fresh install (or a migrating token-only pairing) can enroll.
+            let phoneEnrolled = PhoneCertStore.loadTrustRoot(at: phoneCertPath) != nil
+            let launchMode: ServerMode = phoneEnrolled ? .locked : .open
+            let coordinator = EnrollmentCoordinator(
+                certPath: phoneCertPath, open: launchMode == .open)
+            coordinator.onEnrolled = { [weak self] in
+                Task { @MainActor in self?.lockAfterEnrollment() }
+            }
+            enrollment = coordinator
             let handler = RequestHandler(
                 token: info.token, icons: icons, sink: gate,
-                calls: callRegistry, callSink: gate)
+                calls: callRegistry, callSink: gate, enroller: coordinator)
             callPanel.onAction = { [callRegistry] key, action in
                 callRegistry.fulfill(key: key, action: action)
             }
             notificationCards.onOpenHistory = { [weak self] in
                 self?.showHistoryWindow()
             }
-            try server.start(certPath: info.certPath, keyPath: info.keyPath, handler: handler)
+            try server.start(
+                certPath: info.certPath, keyPath: info.keyPath, handler: handler,
+                phoneCertPath: phoneCertPath, mode: launchMode)
             bonjour.publish(port: server.port)
             statusLine = "Listening on port \(server.port)"
         } catch {
@@ -118,6 +138,9 @@ final class AppState: ObservableObject {
 
     func showQRWindow() {
         guard let pairing else { return }
+        // Opening the pairing window is the physical consent step: unlock the
+        // server so a new (or re-pairing) phone can enroll.
+        openForPairing()
         // The payload embeds the Mac's current IP, so it is rebuilt on
         // every open; a cached first render could show a dead address.
         if let existing = qrWindow {
@@ -136,7 +159,48 @@ final class AppState: ObservableObject {
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        // Closing the window ends the consent window: re-lock if a phone has
+        // enrolled, otherwise stay open (nothing to lock to yet).
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: window, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.relockIfEnrolled() }
+        }
         qrWindow = window
+    }
+
+    // Switch to open mode so /enroll is accepted. Idempotent.
+    private func openForPairing() {
+        enrollment?.setOpen(true)
+        guard server.mode != .open else { return }
+        do {
+            try server.reload(mode: .open, phoneCertPath: phoneCertPath)
+            bonjour.stop()
+            bonjour.publish(port: server.port)
+        } catch {
+            statusLine = "Pairing restart failed: \(error.localizedDescription)"
+        }
+    }
+
+    // A phone enrolled its certificate: lock down and close the pairing UI.
+    private func lockAfterEnrollment() {
+        relockIfEnrolled()
+        qrWindow?.close()
+    }
+
+    private func relockIfEnrolled() {
+        guard PhoneCertStore.loadTrustRoot(at: phoneCertPath) != nil else { return }
+        enrollment?.setOpen(false)
+        guard server.mode != .locked else { return }
+        do {
+            try server.reload(mode: .locked, phoneCertPath: phoneCertPath)
+            bonjour.stop()
+            bonjour.publish(port: server.port)
+            statusLine = "Listening on port \(server.port)"
+        } catch {
+            // Keep the (still-running) open listener rather than going dark.
+            statusLine = "Lock restart failed: \(error.localizedDescription)"
+        }
     }
 
     private func qrContent(info: PairingInfo) -> AnyView {

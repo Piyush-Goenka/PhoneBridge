@@ -13,7 +13,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.core.app.NotificationManagerCompat
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
+import com.piyush.phonebridge.net.ClientIdentity
+import com.piyush.phonebridge.net.Enrollment
 import com.piyush.phonebridge.net.HostResolver
+import com.piyush.phonebridge.net.MacClient
 import com.piyush.phonebridge.net.SweepProber
 import com.piyush.phonebridge.pairing.PairingStore
 import com.piyush.phonebridge.pairing.QrPayload
@@ -42,10 +45,31 @@ class MainActivity : ComponentActivity() {
         val payload = QrPayload.parse(contents)
         if (payload == null) {
             Toast.makeText(this, "Not a PhoneBridge QR code", Toast.LENGTH_LONG).show()
+        } else if (!ClientIdentity.ensure()) {
+            // No hardware-backed identity means no mutual TLS; refuse rather
+            // than silently downgrading the pairing.
+            Toast.makeText(
+                this, "This device can't create a secure key; pairing cancelled",
+                Toast.LENGTH_LONG).show()
         } else {
             store.apply(payload)
             paired.value = true
             Toast.makeText(this, "Paired with ${payload.host}", Toast.LENGTH_LONG).show()
+            enrollWhilePairing(payload.host, payload.port)
+        }
+    }
+
+    // Best-effort immediate enrollment right after a scan, so a fresh pairing
+    // locks the Mac to mutual TLS without waiting for the first notification.
+    // If the Mac is not reachable yet, the relay service enrolls on its next
+    // successful send.
+    private fun enrollWhilePairing(host: String, port: Int) {
+        val token = store.token ?: return
+        val fingerprint = store.fingerprint ?: return
+        uiScope.launch {
+            withContext(Dispatchers.IO) {
+                Enrollment.ensure(store, MacClient(token, fingerprint), host, port)
+            }
         }
     }
 

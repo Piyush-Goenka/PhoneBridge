@@ -1,10 +1,27 @@
 package com.piyush.phonebridge.pairing
 
 import android.content.Context
+import android.content.SharedPreferences
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
 
 class PairingStore(context: Context) {
 
-    private val prefs = context.getSharedPreferences("pairing", Context.MODE_PRIVATE)
+    // Token, fingerprint, and host live in an AES-256 encrypted store whose
+    // key is held in the Android Keystore (hardware-backed where available),
+    // so the values are not readable from a raw prefs file or a backup.
+    private val prefs: SharedPreferences = run {
+        val masterKey = MasterKey.Builder(context.applicationContext)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build()
+        EncryptedSharedPreferences.create(
+            context.applicationContext,
+            "pairing.secure",
+            masterKey,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+        )
+    }
 
     var token: String?
         get() = prefs.getString("token", null)
@@ -34,6 +51,12 @@ class PairingStore(context: Context) {
         get() = prefs.getBoolean("mirrorCalls", false)
         set(value) = prefs.edit().putBoolean("mirrorCalls", value).apply()
 
+    // Whether this phone's client certificate has been enrolled on the Mac
+    // (mutual TLS). Reset on every fresh pairing so a new Mac re-enrolls.
+    var clientEnrolled: Boolean
+        get() = prefs.getBoolean("clientEnrolled", false)
+        set(value) = prefs.edit().putBoolean("clientEnrolled", value).apply()
+
     val isPaired: Boolean
         get() = token != null && fingerprint != null
 
@@ -42,5 +65,6 @@ class PairingStore(context: Context) {
         fingerprint = qr.fingerprint
         host = qr.host
         port = qr.port
+        clientEnrolled = false
     }
 }

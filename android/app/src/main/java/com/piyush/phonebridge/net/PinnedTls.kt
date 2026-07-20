@@ -3,6 +3,7 @@ package com.piyush.phonebridge.net
 import java.security.MessageDigest
 import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
+import javax.net.ssl.KeyManager
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.X509TrustManager
@@ -32,8 +33,14 @@ object PinnedTls {
         }
     }
 
-    fun socketFactory(trustManager: X509TrustManager): SSLSocketFactory =
+    // keyManagers presents the phone's client certificate for mutual TLS. It
+    // is harmless in open mode (the server never asks for a client cert, so
+    // nothing is sent) and required once the server locks.
+    fun socketFactory(
+        trustManager: X509TrustManager,
+        keyManagers: Array<KeyManager>? = ClientIdentity.keyManagers(),
+    ): SSLSocketFactory =
         SSLContext.getInstance("TLS").apply {
-            init(null, arrayOf(trustManager), null)
+            init(keyManagers, arrayOf(trustManager), null)
         }.socketFactory
 }

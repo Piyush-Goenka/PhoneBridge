@@ -34,17 +34,22 @@ public struct HistoryEntry: Codable, Equatable, Identifiable {
 public final class NotificationHistory {
     private let fileURL: URL
     private let cap: Int
+    private let cipher: HistoryCipher
     private let lock = NSLock()
     private var stored: [HistoryEntry]
 
     public var onChange: (([HistoryEntry]) -> Void)?
 
-    public init(fileURL: URL, cap: Int = 200) {
+    // Retention is deliberately short: only the most recent notifications are
+    // worth keeping, and a smaller on-disk footprint means less to protect.
+    public init(fileURL: URL, cap: Int = 20, cipher: HistoryCipher = PlaintextHistoryCipher()) {
         self.fileURL = fileURL
         self.cap = cap
+        self.cipher = cipher
         if let data = try? Data(contentsOf: fileURL),
-           let entries = try? JSONDecoder().decode([HistoryEntry].self, from: data) {
-            stored = entries
+           let plaintext = try? cipher.open(data),
+           let entries = try? JSONDecoder().decode([HistoryEntry].self, from: plaintext) {
+            stored = Array(entries.prefix(cap))
         } else {
             stored = []
         }
@@ -138,10 +143,13 @@ public final class NotificationHistory {
     }
 
     private func save(_ entries: [HistoryEntry]) {
-        guard let data = try? JSONEncoder().encode(entries) else { return }
+        guard let plaintext = try? JSONEncoder().encode(entries),
+              let data = try? cipher.seal(plaintext) else { return }
         try? FileManager.default.createDirectory(
             at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? data.write(to: fileURL, options: .atomic)
+        guard (try? data.write(to: fileURL, options: .atomic)) != nil else { return }
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
     }
 }
 

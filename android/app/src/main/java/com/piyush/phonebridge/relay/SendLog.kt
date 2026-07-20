@@ -21,7 +21,7 @@ object SendLog {
 
     fun add(appName: String, title: String, outcome: String) {
         _entries.update { current ->
-            (listOf(Entry(System.currentTimeMillis(), appName, title, outcome)) + current).take(50)
+            (listOf(Entry(System.currentTimeMillis(), appName, title, outcome)) + current).take(20)
         }
     }
 }
