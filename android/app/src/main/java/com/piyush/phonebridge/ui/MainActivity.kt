@@ -37,6 +37,12 @@ class MainActivity : ComponentActivity() {
     // null while a check is running (or nothing is paired), then the result
     // of actually knocking on the Mac's port with the pinned certificate.
     private val macReachable = mutableStateOf<Boolean?>(null)
+    // Pairing flow state, surfaced to the UI (#8): a scanned payload awaiting
+    // the user's confirmation to replace an existing pairing, an error to
+    // show, and whether a reachability verification is in flight.
+    private val pendingPairing = mutableStateOf<QrPayload?>(null)
+    private val pairingError = mutableStateOf<String?>(null)
+    private val verifyingPairing = mutableStateOf(false)
     private val uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var reachabilityJob: Job? = null
 
@@ -52,11 +58,50 @@ class MainActivity : ComponentActivity() {
                 this, "This device can't create a secure key; pairing cancelled",
                 Toast.LENGTH_LONG).show()
         } else {
-            store.apply(payload)
-            paired.value = true
-            Toast.makeText(this, "Paired with ${payload.host}", Toast.LENGTH_LONG).show()
-            enrollWhilePairing(payload.host, payload.port)
+            verifyAndPair(payload)
         }
+    }
+
+    // Before trusting a scanned QR, prove it points at a real Mac that holds
+    // the scanned certificate (kills dead redirects and typos), and if it is a
+    // DIFFERENT Mac than the current pairing, ask before redirecting every
+    // notification to it. A silent overwrite is exactly the redirection risk.
+    private fun verifyAndPair(payload: QrPayload) {
+        verifyingPairing.value = true
+        uiScope.launch {
+            val reachable = withContext(Dispatchers.IO) {
+                SweepProber(payload.fingerprint)
+                    .findMac(listOf(payload.host), payload.port) != null
+            }
+            verifyingPairing.value = false
+            if (!reachable) {
+                pairingError.value = "Couldn't reach that Mac. Make sure it is the " +
+                    "PhoneBridge Mac on the same Wi-Fi, then scan again."
+                return@launch
+            }
+            val existing = store.fingerprint
+            if (store.isPaired && existing != null && existing != payload.fingerprint) {
+                pendingPairing.value = payload
+            } else {
+                commitPairing(payload)
+            }
+        }
+    }
+
+    private fun commitPairing(payload: QrPayload) {
+        store.apply(payload)
+        paired.value = true
+        Toast.makeText(this, "Paired with ${payload.host}", Toast.LENGTH_LONG).show()
+        enrollWhilePairing(payload.host, payload.port)
+        checkMacReachable()
+    }
+
+    private fun unpair() {
+        store.clear()
+        ClientIdentity.delete()
+        paired.value = false
+        macReachable.value = null
+        Toast.makeText(this, "Unpaired from the Mac", Toast.LENGTH_LONG).show()
     }
 
     // Best-effort immediate enrollment right after a scan, so a fresh pairing
@@ -112,6 +157,9 @@ class MainActivity : ComponentActivity() {
                     paired = paired,
                     accessGranted = accessGranted,
                     macReachable = macReachable,
+                    verifyingPairing = verifyingPairing,
+                    pendingPairing = pendingPairing,
+                    pairingError = pairingError,
                     onEnableAccess = {
                         startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
                     },
@@ -125,6 +173,12 @@ class MainActivity : ComponentActivity() {
                                 .setCaptureActivity(PortraitCaptureActivity::class.java))
                     },
                     onMirrorCalls = ::onMirrorCallsChanged,
+                    onConfirmReplace = { commitPairing(it); pendingPairing.value = null },
+                    onDismissPairingDialog = {
+                        pendingPairing.value = null
+                        pairingError.value = null
+                    },
+                    onUnpair = ::unpair,
                 )
             }
         }

@@ -7,6 +7,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -14,6 +15,7 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -25,6 +27,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import com.piyush.phonebridge.pairing.PairingStore
+import com.piyush.phonebridge.pairing.QrPayload
 
 data class AppEntry(val pkg: String, val label: String)
 
@@ -51,11 +54,46 @@ fun MainScreen(
     paired: MutableState<Boolean>,
     accessGranted: MutableState<Boolean>,
     macReachable: MutableState<Boolean?>,
+    verifyingPairing: MutableState<Boolean>,
+    pendingPairing: MutableState<QrPayload?>,
+    pairingError: MutableState<String?>,
     onEnableAccess: () -> Unit,
     onScanQr: () -> Unit,
     onMirrorCalls: (Boolean) -> Unit,
+    onConfirmReplace: (QrPayload) -> Unit,
+    onDismissPairingDialog: () -> Unit,
+    onUnpair: () -> Unit,
 ) {
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
+
+    val pending = pendingPairing.value
+    if (pending != null) {
+        AlertDialog(
+            onDismissRequest = onDismissPairingDialog,
+            title = { Text("Replace paired Mac?") },
+            text = {
+                Text(
+                    "This QR is for a different Mac (${pending.host}). Pairing with it " +
+                        "will send your notifications there instead of your current Mac.")
+            },
+            confirmButton = {
+                TextButton(onClick = { onConfirmReplace(pending) }) { Text("Replace") }
+            },
+            dismissButton = {
+                TextButton(onClick = onDismissPairingDialog) { Text("Cancel") }
+            },
+        )
+    }
+
+    val error = pairingError.value
+    if (error != null) {
+        AlertDialog(
+            onDismissRequest = onDismissPairingDialog,
+            title = { Text("Pairing failed") },
+            text = { Text(error) },
+            confirmButton = { TextButton(onClick = onDismissPairingDialog) { Text("OK") } },
+        )
+    }
 
     Scaffold(
         topBar = {
@@ -94,9 +132,11 @@ fun MainScreen(
                     paired = paired,
                     accessGranted = accessGranted,
                     macReachable = macReachable,
+                    verifying = verifyingPairing.value,
                     onEnableAccess = onEnableAccess,
                     onScanQr = onScanQr,
-                    onMirrorCalls = onMirrorCalls)
+                    onMirrorCalls = onMirrorCalls,
+                    onUnpair = onUnpair)
             }
             1 -> androidx.compose.foundation.layout.Box(content) { AppsTab(store = store) }
             else -> androidx.compose.foundation.layout.Box(content) { ActivityTab() }

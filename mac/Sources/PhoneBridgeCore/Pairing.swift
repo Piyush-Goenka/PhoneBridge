@@ -72,6 +72,14 @@ public enum Pairing {
         return keyPEM
     }
 
+    // Mints a fresh token and stores it, invalidating the previous one. Used
+    // on unpair so an old QR photograph or leaked token stops working.
+    public static func rotateToken(secrets: SecretStore = KeychainSecretStore()) throws -> String {
+        let token = try randomToken()
+        try secrets.set(Data(token.utf8), for: tokenAccount)
+        return token
+    }
+
     private static func ensureToken(
         legacyTokenPath: URL, secrets: SecretStore, fm: FileManager
     ) throws -> String {

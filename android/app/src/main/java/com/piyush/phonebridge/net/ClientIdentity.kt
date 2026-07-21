@@ -65,6 +65,17 @@ object ClientIdentity {
         }
     }
 
+    // Drops the identity on unpair so the next pairing generates a fresh key
+    // and the old certificate can never authenticate again.
+    fun delete() {
+        try {
+            val ks = keyStore()
+            if (ks.containsAlias(ALIAS)) ks.deleteEntry(ALIAS)
+        } catch (e: Exception) {
+            // Nothing usable to delete; unpair proceeds regardless.
+        }
+    }
+
     // Base64 DER of the client certificate, the body of the /enroll request.
     fun certificateDerBase64(): String? {
         if (!ensure()) return null

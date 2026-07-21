@@ -13,6 +13,12 @@ public final class BridgeServer {
     private let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     private var channel: Channel?
     public private(set) var port: Int = 0
+    // Shared across every accepted connection so a flood cannot exhaust the
+    // single event loop's file descriptors or memory (#5).
+    private let limiter = ConnectionLimiter()
+    // Longer than the 45 s /call/wait hold plus its re-poll, so a legitimate
+    // long-poll survives while a silent slow-loris connection is reaped.
+    private static let idleTimeout = TimeAmount.seconds(90)
 
     // Retained so a mode switch can rebind the same listener with a new TLS
     // context without the caller re-supplying everything.
@@ -55,11 +61,18 @@ public final class BridgeServer {
 
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
-            .childChannelInitializer { channel in
-                // The source gate runs before TLS: an internet-routed peer is
-                // closed before it can start a handshake.
+            .childChannelInitializer { [limiter] channel in
+                // Runs before TLS, cheapest checks first: drop internet-routed
+                // peers, then enforce the connection cap, then reap idle/slow
+                // connections, all before a handshake byte is processed.
                 channel.pipeline
                     .addHandler(SourceGateHandler())
+                    .flatMap { channel.pipeline.addHandler(ConnectionLimitHandler(limiter: limiter)) }
+                    .flatMap {
+                        channel.pipeline.addHandler(
+                            IdleStateHandler(allTimeout: Self.idleTimeout))
+                    }
+                    .flatMap { channel.pipeline.addHandler(IdleCloseHandler()) }
                     .flatMap { channel.pipeline.addHandler(NIOSSLServerHandler(context: sslContext)) }
                     .flatMap { channel.pipeline.configureHTTPServerPipeline() }
                     .flatMap { channel.pipeline.addHandler(HTTPHandler(handler: handler)) }
@@ -131,6 +144,80 @@ final class SourceGateHandler: ChannelInboundHandler {
             context.fireChannelActive()
         } else {
             context.close(promise: nil)
+        }
+    }
+}
+
+// Bounds concurrent connections in total and per source IP, so no single peer
+// (or a flood of them) can pin the single event loop's resources. Shared
+// across every connection, so its counts are guarded by a lock.
+public final class ConnectionLimiter {
+    private let lock = NSLock()
+    private var perIP: [String: Int] = [:]
+    private var total = 0
+    private let maxTotal: Int
+    private let maxPerIP: Int
+
+    public init(maxTotal: Int = 64, maxPerIP: Int = 8) {
+        self.maxTotal = maxTotal
+        self.maxPerIP = maxPerIP
+    }
+
+    public func acquire(_ ip: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard total < maxTotal, perIP[ip, default: 0] < maxPerIP else { return false }
+        total += 1
+        perIP[ip, default: 0] += 1
+        return true
+    }
+
+    public func release(_ ip: String) {
+        lock.lock(); defer { lock.unlock() }
+        total = max(0, total - 1)
+        guard let count = perIP[ip] else { return }
+        if count <= 1 { perIP[ip] = nil } else { perIP[ip] = count - 1 }
+    }
+}
+
+final class ConnectionLimitHandler: ChannelInboundHandler {
+    typealias InboundIn = ByteBuffer
+
+    private let limiter: ConnectionLimiter
+    private var acquiredIP: String?
+
+    init(limiter: ConnectionLimiter) {
+        self.limiter = limiter
+    }
+
+    func channelActive(context: ChannelHandlerContext) {
+        let ip = context.remoteAddress?.ipAddress ?? "?"
+        if limiter.acquire(ip) {
+            acquiredIP = ip
+            context.fireChannelActive()
+        } else {
+            context.close(promise: nil)
+        }
+    }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        if let ip = acquiredIP {
+            limiter.release(ip)
+            acquiredIP = nil
+        }
+        context.fireChannelInactive()
+    }
+}
+
+// Closes a connection that IdleStateHandler reports as idle, reaping
+// slow-loris connections that complete no request within the window.
+final class IdleCloseHandler: ChannelInboundHandler {
+    typealias InboundIn = NIOAny
+
+    func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
+        if event is IdleStateHandler.IdleStateEvent {
+            context.close(promise: nil)
+        } else {
+            context.fireUserInboundEventTriggered(event)
         }
     }
 }

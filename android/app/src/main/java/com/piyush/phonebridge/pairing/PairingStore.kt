@@ -67,4 +67,16 @@ class PairingStore(context: Context) {
         port = qr.port
         clientEnrolled = false
     }
+
+    // Forget the paired Mac. Leaves user preferences (allowlist, toggles)
+    // intact so re-pairing does not reset them.
+    fun clear() {
+        prefs.edit()
+            .remove("token")
+            .remove("fingerprint")
+            .remove("host")
+            .remove("port")
+            .remove("clientEnrolled")
+            .apply()
+    }
 }

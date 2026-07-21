@@ -25,15 +25,23 @@ class HostResolver(private val context: Context) {
         store: PairingStore,
         now: Long = System.currentTimeMillis(),
     ): Pair<String, Int>? {
+        val fingerprint = store.fingerprint ?: return null
+
         MacDiscovery(context).discover()?.let { (host, port) ->
-            Log.d("PhoneBridge", "rediscover: mDNS found $host:$port")
-            store.host = host
-            store.port = port
-            lastSweepFailureAt = 0L
-            return host to port
+            // mDNS is unauthenticated multicast: anyone on the LAN can answer,
+            // and a poisoned answer would otherwise overwrite the cached host
+            // AND port, breaking the sweep too. Only trust it after the pinned
+            // certificate check passes, exactly like the sweep path below.
+            if (SweepProber(fingerprint).findMac(listOf(host), port) != null) {
+                Log.d("PhoneBridge", "rediscover: mDNS verified $host:$port")
+                store.host = host
+                store.port = port
+                lastSweepFailureAt = 0L
+                return host to port
+            }
+            Log.d("PhoneBridge", "rediscover: mDNS $host:$port failed pin check, ignoring")
         }
 
-        val fingerprint = store.fingerprint ?: return null
         if (!SweepPlan.shouldSweep(now, lastSweepFailureAt)) {
             Log.d("PhoneBridge", "rediscover: sweep on cooldown")
             return null

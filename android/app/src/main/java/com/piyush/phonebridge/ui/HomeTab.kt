@@ -48,12 +48,33 @@ fun HomeTab(
     paired: MutableState<Boolean>,
     accessGranted: MutableState<Boolean>,
     macReachable: MutableState<Boolean?>,
+    verifying: Boolean,
     onEnableAccess: () -> Unit,
     onScanQr: () -> Unit,
     onMirrorCalls: (Boolean) -> Unit,
+    onUnpair: () -> Unit,
 ) {
     var mirroring by remember { mutableStateOf(store.mirroringEnabled) }
     var mirrorCalls by remember { mutableStateOf(store.mirrorCallsEnabled) }
+    var confirmUnpair by remember { mutableStateOf(false) }
+
+    if (confirmUnpair) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { confirmUnpair = false },
+            title = { Text("Unpair from the Mac?") },
+            text = { Text("Notifications will stop mirroring until you pair again.") },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    confirmUnpair = false
+                    onUnpair()
+                }) { Text("Unpair") }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(
+                    onClick = { confirmUnpair = false }) { Text("Cancel") }
+            },
+        )
+    }
 
     Column(
         modifier = Modifier
@@ -152,9 +173,24 @@ fun HomeTab(
 
         FilledTonalButton(
             onClick = onScanQr,
+            enabled = !verifying,
             modifier = Modifier.fillMaxWidth().height(48.dp),
         ) {
-            Text(if (paired.value) "Re-pair with the Mac" else "Scan pairing QR")
+            Text(
+                when {
+                    verifying -> "Verifying Mac…"
+                    paired.value -> "Re-pair with the Mac"
+                    else -> "Scan pairing QR"
+                })
+        }
+
+        if (paired.value) {
+            androidx.compose.material3.TextButton(
+                onClick = { confirmUnpair = true },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Unpair", color = Brand.amber)
+            }
         }
     }
 }

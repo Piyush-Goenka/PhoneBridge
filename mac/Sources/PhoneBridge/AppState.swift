@@ -28,11 +28,13 @@ final class AppState: ObservableObject {
     private var lastKnownIPv4: String?
     private var enrollment: EnrollmentCoordinator?
     private let phoneCertPath: URL
+    private let appDir: URL
 
     init() {
         let dir = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("PhoneBridge")
+        appDir = dir
         phoneCertPath = PhoneCertStore.path(directory: dir)
         // Encrypt history at rest with a Keychain-held key; fall back to
         // plaintext only if the Keychain is somehow unavailable, so history
@@ -47,35 +49,19 @@ final class AppState: ObservableObject {
         history.onChange = { [historyModel] entries in
             DispatchQueue.main.async { historyModel.entries = entries }
         }
+        callPanel.onAction = { [callRegistry] key, action in
+            callRegistry.fulfill(key: key, action: action)
+        }
+        notificationCards.onOpenHistory = { [weak self] in
+            self?.showHistoryWindow()
+        }
         do {
             let info = try Pairing.ensure(directory: dir)
-            pairing = info
-            let icons = try DiskIconStore(directory: dir.appendingPathComponent("icons"))
-            iconStore = icons
+            iconStore = try DiskIconStore(directory: dir.appendingPathComponent("icons"))
             // Locked at launch once a phone has enrolled; open until then so a
             // fresh install (or a migrating token-only pairing) can enroll.
             let phoneEnrolled = PhoneCertStore.loadTrustRoot(at: phoneCertPath) != nil
-            let launchMode: ServerMode = phoneEnrolled ? .locked : .open
-            let coordinator = EnrollmentCoordinator(
-                certPath: phoneCertPath, open: launchMode == .open)
-            coordinator.onEnrolled = { [weak self] in
-                Task { @MainActor in self?.lockAfterEnrollment() }
-            }
-            enrollment = coordinator
-            let handler = RequestHandler(
-                token: info.token, icons: icons, sink: gate,
-                calls: callRegistry, callSink: gate, enroller: coordinator)
-            callPanel.onAction = { [callRegistry] key, action in
-                callRegistry.fulfill(key: key, action: action)
-            }
-            notificationCards.onOpenHistory = { [weak self] in
-                self?.showHistoryWindow()
-            }
-            try server.start(
-                certPath: info.certPath, keyPEM: info.keyPEM, handler: handler,
-                phoneCertPath: phoneCertPath, mode: launchMode)
-            bonjour.publish(port: server.port)
-            statusLine = "Listening on port \(server.port)"
+            try bringUpServer(info: info, mode: phoneEnrolled ? .locked : .open)
         } catch {
             statusLine = "Failed to start: \(error.localizedDescription)"
         }
@@ -93,6 +79,45 @@ final class AppState: ObservableObject {
         }
         monitor.start(queue: .main)
         pathMonitor = monitor
+    }
+
+    // (Re)builds the request handler and listener for the given pairing and
+    // mode. Used at launch and again on unpair, when a rotated token needs a
+    // fresh handler.
+    private func bringUpServer(info: PairingInfo, mode: ServerMode) throws {
+        guard let icons = iconStore else { return }
+        pairing = info
+        let coordinator = EnrollmentCoordinator(certPath: phoneCertPath, open: mode == .open)
+        coordinator.onEnrolled = { [weak self] in
+            Task { @MainActor in self?.lockAfterEnrollment() }
+        }
+        enrollment = coordinator
+        let handler = RequestHandler(
+            token: info.token, icons: icons, sink: gate,
+            calls: callRegistry, callSink: gate, enroller: coordinator)
+        server.stop()
+        try server.start(
+            certPath: info.certPath, keyPEM: info.keyPEM, handler: handler,
+            phoneCertPath: phoneCertPath, mode: mode)
+        bonjour.stop()
+        bonjour.publish(port: server.port)
+        statusLine = "Listening on port \(server.port)"
+    }
+
+    var isPaired: Bool { PhoneCertStore.loadTrustRoot(at: phoneCertPath) != nil }
+
+    // Forget the enrolled phone, rotate the token so any old QR photograph or
+    // leaked token stops working, reopen for pairing, and show the QR.
+    func unpair() {
+        try? FileManager.default.removeItem(at: phoneCertPath)
+        do {
+            _ = try Pairing.rotateToken()
+            let info = try Pairing.ensure(directory: appDir)
+            try bringUpServer(info: info, mode: .open)
+            showQRWindow()
+        } catch {
+            statusLine = "Unpair failed: \(error.localizedDescription)"
+        }
     }
 
     // Lid reopen or network change can hand the Mac a new address. The

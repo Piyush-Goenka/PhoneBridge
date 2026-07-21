@@ -8,6 +8,11 @@ The Mac advertises Bonjour service type `_phonenotif._tcp.` (default port 52735,
 but the advertised and QR port is authoritative). The phone resolves on demand,
 caches host and port, and re-resolves once on connection failure.
 
+mDNS is unauthenticated multicast, so the phone treats a discovered host:port
+as a candidate only: it caches the address **after** a pinned-TLS handshake
+against it succeeds, exactly as it does for the subnet-sweep path. A spoofed
+mDNS answer therefore cannot poison the cache.
+
 ## Security
 
 - TLS 1.2+ with a self-signed certificate. The phone verifies nothing about the
@@ -23,6 +28,19 @@ caches host and port, and re-resolves once on connection failure.
   gets `401 {"error":"unauthorized"}`.
 - All endpoints accept only POST; other methods get
   `405 {"error":"method not allowed"}`.
+- Unpairing on the Mac deletes the enrolled phone certificate and mints a new
+  token, so an old QR photograph or a leaked token stops working. The phone's
+  Unpair wipes its pairing and its Keystore client identity.
+
+## Server limits (defense in depth)
+
+- Connections are dropped before TLS unless the peer's source IP is loopback,
+  RFC 1918, link-local, or CGNAT (100.64/10, for VPNs).
+- Concurrent connections are capped (64 total, 8 per source IP); excess
+  connections are closed immediately.
+- A connection idle (no read or write) for 90 s is closed, reaping
+  slow-loris connections. The window is above the 45 s `/call/wait` hold, so
+  a legitimate long-poll is never reaped.
 
 ## Validation
 
@@ -43,6 +61,12 @@ fields before sending so real notifications are trimmed, not dropped.
 ```json
 {"v":1,"host":"Piyushs-MacBook.local","port":52735,"token":"<base64url>","fp":"<64 hex chars, sha256 of cert DER>"}
 ```
+
+Before committing a scanned payload the phone verifies it points at a real Mac
+holding the scanned certificate (one pinned-TLS probe against host:port). If
+that fails it refuses and asks the user to rescan. If it succeeds but the
+fingerprint differs from an existing pairing, the phone asks the user to
+confirm replacing their current Mac before redirecting notifications.
 
 ## Endpoints (all POST, JSON bodies, JSON responses)
 
