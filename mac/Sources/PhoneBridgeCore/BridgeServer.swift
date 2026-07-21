@@ -185,7 +185,10 @@ final class HTTPHandler: ChannelInboundHandler {
             let version = head.version
             let loop = context.eventLoop
             let ctx = context
-            handler.handleAsync(path: head.uri, authorization: auth, body: requestBody) { result in
+            handler.handleAsync(
+                path: head.uri, authorization: auth, body: requestBody,
+                method: head.method.rawValue
+            ) { result in
                 loop.execute {
                     var responseHead = HTTPResponseHead(
                         version: version,

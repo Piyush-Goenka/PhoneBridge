@@ -74,7 +74,7 @@ class NotificationRelayService : NotificationListenerService() {
             ) {
                 val caller = notification.title.ifBlank {
                     notification.text.ifBlank { CallSessionDecider.UNKNOWN_CALLER }
-                }
+                }.take(256)
                 val decision = synchronized(activeCalls) {
                     CallSessionDecider.decide(
                         activeCaller = activeCalls[notification.key],
@@ -396,14 +396,16 @@ class NotificationRelayService : NotificationListenerService() {
     private fun extract(sbn: StatusBarNotification): RelayNotification? {
         val notification = sbn.notification ?: return null
         val extras = notification.extras
-        val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""
-        val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""
+        // The Mac rejects oversized fields; trim here so a long notification
+        // arrives truncated instead of being dropped with a 400.
+        val title = (extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: "").take(512)
+        val text = (extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: "").take(4096)
         val appName = try {
             val info = packageManager.getApplicationInfo(sbn.packageName, 0)
             packageManager.getApplicationLabel(info).toString()
         } catch (e: Exception) {
             sbn.packageName
-        }
+        }.take(128)
         return RelayNotification(
             key = sbn.key,
             pkg = sbn.packageName,

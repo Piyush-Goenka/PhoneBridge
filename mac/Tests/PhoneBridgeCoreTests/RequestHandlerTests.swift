@@ -1,4 +1,5 @@
 import XCTest
+import CryptoKit
 @testable import PhoneBridgeCore
 
 final class MockIconStore: IconStoring {
@@ -35,9 +36,12 @@ final class RequestHandlerTests: XCTestCase {
     private var callSink: MockCallSink!
     private var registry: CallActionRegistry!
 
+    // 64-hex icon hash in the exact format the phone sends.
+    static let hashA = "sha256:" + String(repeating: "a", count: 64)
+
     private let validNotify = """
         {"v":1,"key":"k1","pkg":"com.whatsapp","appName":"WhatsApp",\
-        "title":"Alice","text":"hi","postedAt":1768406400000,"iconHash":"sha256:aa"}
+        "title":"Alice","text":"hi","postedAt":1768406400000,"iconHash":"\(hashA)"}
         """
 
     override func setUp() {
@@ -45,9 +49,11 @@ final class RequestHandlerTests: XCTestCase {
         sink = MockSink()
         callSink = MockCallSink()
         registry = CallActionRegistry(timeout: 10)
+        // Clock frozen to the payloads' postedAt so freshness checks pass.
         handler = RequestHandler(
             token: "secret", icons: icons, sink: sink,
-            calls: registry, callSink: callSink)
+            calls: registry, callSink: callSink,
+            now: { Date(timeIntervalSince1970: 1_768_406_400) })
     }
 
     private func post(_ path: String, auth: String?, body: String) -> HandlerResult {
@@ -79,13 +85,13 @@ final class RequestHandlerTests: XCTestCase {
     }
 
     func testKnownIconHashDoesNotRequestIcon() throws {
-        try icons.save("sha256:aa", png: Data([1]))
+        try icons.save(Self.hashA, png: Data([1]))
         let r = post("/notify", auth: "Bearer secret", body: validNotify)
         XCTAssertEqual(r.body, #"{"needIcon":false}"#)
     }
 
     func testEmptyIconHashNeverRequestsIcon() {
-        let body = validNotify.replacingOccurrences(of: "sha256:aa", with: "")
+        let body = validNotify.replacingOccurrences(of: Self.hashA, with: "")
         let r = post("/notify", auth: "Bearer secret", body: body)
         XCTAssertEqual(r.body, #"{"needIcon":false}"#)
     }
@@ -95,12 +101,95 @@ final class RequestHandlerTests: XCTestCase {
         XCTAssertEqual(r.status, 400)
     }
 
+    // A minimal payload that passes the PNG-signature check, with the hash
+    // computed the same way the phone computes it.
+    private func pngAndHash() -> (base64: String, hash: String) {
+        let png = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x01, 0x02])
+        let hex = SHA256.hash(data: png).map { String(format: "%02x", $0) }.joined()
+        return (png.base64EncodedString(), "sha256:\(hex)")
+    }
+
     func testIconUploadStoresPNG() {
-        let png = Data([0x89, 0x50, 0x4E, 0x47]).base64EncodedString()
+        let (png, hash) = pngAndHash()
         let r = post("/icon", auth: "Bearer secret",
-                     body: #"{"iconHash":"sha256:bb","png":"\#(png)"}"#)
+                     body: #"{"iconHash":"\#(hash)","png":"\#(png)"}"#)
         XCTAssertEqual(r.status, 200)
-        XCTAssertTrue(icons.has("sha256:bb"))
+        XCTAssertTrue(icons.has(hash))
+    }
+
+    func testIconUploadRejectsNonPNGBytes() {
+        let notPng = Data([0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07])
+        let hex = SHA256.hash(data: notPng).map { String(format: "%02x", $0) }.joined()
+        let r = post("/icon", auth: "Bearer secret",
+                     body: #"{"iconHash":"sha256:\#(hex)","png":"\#(notPng.base64EncodedString())"}"#)
+        XCTAssertEqual(r.status, 400)
+        XCTAssertTrue(icons.stored.isEmpty)
+    }
+
+    func testIconUploadRejectsHashMismatch() {
+        let (png, _) = pngAndHash()
+        let r = post("/icon", auth: "Bearer secret",
+                     body: #"{"iconHash":"\#(Self.hashA)","png":"\#(png)"}"#)
+        XCTAssertEqual(r.status, 400)
+        XCTAssertTrue(icons.stored.isEmpty)
+    }
+
+    func testNotifyRejectsWrongProtocolVersion() {
+        let body = validNotify.replacingOccurrences(of: #""v":1"#, with: #""v":2"#)
+        XCTAssertEqual(post("/notify", auth: "Bearer secret", body: body).status, 400)
+        XCTAssertTrue(sink.shown.isEmpty)
+    }
+
+    func testCallRejectsWrongProtocolVersion() {
+        let body = #"{"v":9,"key":"c1","caller":"Manoj","postedAt":1768406400000}"#
+        XCTAssertEqual(post("/call", auth: "Bearer secret", body: body).status, 400)
+        XCTAssertTrue(callSink.calls.isEmpty)
+    }
+
+    func testNotifyRejectsOversizedField() {
+        let long = String(repeating: "x", count: 5000)
+        let body = validNotify.replacingOccurrences(of: #""text":"hi""#, with: #""text":"\#(long)""#)
+        XCTAssertEqual(post("/notify", auth: "Bearer secret", body: body).status, 400)
+        XCTAssertTrue(sink.shown.isEmpty)
+    }
+
+    func testNotifyRejectsMalformedIconHash() {
+        let body = validNotify.replacingOccurrences(of: Self.hashA, with: "sha256:../escape")
+        XCTAssertEqual(post("/notify", auth: "Bearer secret", body: body).status, 400)
+    }
+
+    func testNotifyRejectsStaleTimestamp() {
+        // Two days before the frozen clock: outside the 24 h window.
+        let body = validNotify.replacingOccurrences(
+            of: "1768406400000", with: "1768233600000")
+        XCTAssertEqual(post("/notify", auth: "Bearer secret", body: body).status, 400)
+        XCTAssertTrue(sink.shown.isEmpty)
+    }
+
+    func testNotifyRejectsFarFutureTimestamp() {
+        // Two hours ahead of the frozen clock: outside the 1 h skew.
+        let body = validNotify.replacingOccurrences(
+            of: "1768406400000", with: "1768413600000")
+        XCTAssertEqual(post("/notify", auth: "Bearer secret", body: body).status, 400)
+    }
+
+    func testNonPostMethodIs405() {
+        let r = handler.handle(
+            path: "/notify", authorization: "Bearer secret",
+            body: Data(validNotify.utf8), method: "GET")
+        XCTAssertEqual(r.status, 405)
+        XCTAssertTrue(sink.shown.isEmpty)
+    }
+
+    func testCallWaitNonPostIs405() {
+        let expectation = expectation(description: "wait")
+        handler.handleAsync(
+            path: "/call/wait", authorization: "Bearer secret",
+            body: Data(#"{"key":"c1"}"#.utf8), method: "GET") { result in
+            XCTAssertEqual(result.status, 405)
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 2)
     }
 
     func testDismissForwardsKey() {
@@ -115,7 +204,7 @@ final class RequestHandlerTests: XCTestCase {
     }
 
     func testCallShowsActionableBanner() {
-        let body = #"{"v":1,"key":"c1","caller":"Palak","postedAt":0}"#
+        let body = #"{"v":1,"key":"c1","caller":"Palak","postedAt":1768406400000}"#
         let r = post("/call", auth: "Bearer secret", body: body)
         XCTAssertEqual(r.status, 200)
         XCTAssertEqual(callSink.calls.first?.key, "c1")
@@ -127,7 +216,7 @@ final class RequestHandlerTests: XCTestCase {
     }
 
     func testCallUpdateRoutesToUpdateNotShow() {
-        let body = #"{"v":1,"key":"c1","caller":"Lattu Chacha","postedAt":0,"update":true}"#
+        let body = #"{"v":1,"key":"c1","caller":"Lattu Chacha","postedAt":1768406400000,"update":true}"#
         let r = post("/call", auth: "Bearer secret", body: body)
         XCTAssertEqual(r.status, 200)
         XCTAssertTrue(callSink.calls.isEmpty)
@@ -136,14 +225,14 @@ final class RequestHandlerTests: XCTestCase {
     }
 
     func testCallWithoutUpdateFlagShowsBanner() {
-        let body = #"{"v":1,"key":"c1","caller":"Manoj","postedAt":0}"#
+        let body = #"{"v":1,"key":"c1","caller":"Manoj","postedAt":1768406400000}"#
         _ = post("/call", auth: "Bearer secret", body: body)
         XCTAssertEqual(callSink.calls.first?.caller, "Manoj")
         XCTAssertTrue(callSink.updated.isEmpty)
     }
 
     func testCallStateActiveSwitchesPanelToInCall() {
-        let body = #"{"v":1,"key":"c1","caller":"Manoj","postedAt":0,"state":"active"}"#
+        let body = #"{"v":1,"key":"c1","caller":"Manoj","postedAt":1768406400000,"state":"active"}"#
         let r = post("/call", auth: "Bearer secret", body: body)
         XCTAssertEqual(r.status, 200)
         XCTAssertTrue(callSink.calls.isEmpty)
@@ -152,14 +241,14 @@ final class RequestHandlerTests: XCTestCase {
     }
 
     func testCallStateSilencedMarksPanel() {
-        let body = #"{"v":1,"key":"c1","caller":"Manoj","postedAt":0,"state":"silenced"}"#
+        let body = #"{"v":1,"key":"c1","caller":"Manoj","postedAt":1768406400000,"state":"silenced"}"#
         _ = post("/call", auth: "Bearer secret", body: body)
         XCTAssertEqual(callSink.states.first?.state, .silenced)
         XCTAssertTrue(callSink.calls.isEmpty)
     }
 
     func testUnknownCallStateFallsBackToShowingTheCall() {
-        let body = #"{"v":1,"key":"c1","caller":"Manoj","postedAt":0,"state":"wat"}"#
+        let body = #"{"v":1,"key":"c1","caller":"Manoj","postedAt":1768406400000,"state":"wat"}"#
         _ = post("/call", auth: "Bearer secret", body: body)
         XCTAssertEqual(callSink.calls.first?.caller, "Manoj")
         XCTAssertTrue(callSink.states.isEmpty)

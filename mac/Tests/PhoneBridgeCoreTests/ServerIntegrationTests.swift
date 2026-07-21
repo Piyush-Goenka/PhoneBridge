@@ -58,9 +58,11 @@ final class ServerIntegrationTests: XCTestCase {
     }
 
     func testNotifyOverTLSRoundTrip() async throws {
+        // The server validates postedAt freshness against the real clock.
+        let nowMillis = Int64(Date().timeIntervalSince1970 * 1000)
         let body = """
             {"v":1,"key":"k1","pkg":"com.x","appName":"X","title":"Hello",\
-            "text":"world","postedAt":0,"iconHash":""}
+            "text":"world","postedAt":\(nowMillis),"iconHash":""}
             """
         let (status, response) = try await post("/notify", auth: "Bearer \(token!)", body: body)
         XCTAssertEqual(status, 200)

@@ -10,11 +10,33 @@ caches host and port, and re-resolves once on connection failure.
 
 ## Security
 
-- TLS with a self-signed certificate. The phone verifies nothing about the chain
-  or hostname; it checks exactly one thing: SHA-256 of the leaf certificate DER
-  equals the pinned fingerprint from the QR code.
+- TLS 1.2+ with a self-signed certificate. The phone verifies nothing about the
+  chain or hostname; it checks exactly one thing: SHA-256 of the leaf
+  certificate DER equals the pinned fingerprint from the QR code.
+- Mutual TLS: the phone holds an EC P-256 keypair in the Android Keystore and
+  presents its self-signed certificate on every connection. After a phone has
+  enrolled (see `/enroll`), the Mac runs **locked**: the TLS handshake requires
+  exactly the enrolled certificate, so unknown peers never reach HTTP. The Mac
+  runs **open** (no client cert required) only while no phone is enrolled or
+  the pairing QR window is showing.
 - Every request carries `Authorization: Bearer <token>`. Missing or wrong token
   gets `401 {"error":"unauthorized"}`.
+- All endpoints accept only POST; other methods get
+  `405 {"error":"method not allowed"}`.
+
+## Validation
+
+The Mac rejects (400) any request violating these bounds; the phone truncates
+fields before sending so real notifications are trimmed, not dropped.
+
+- `v` must be `1` on `/notify`, `/call`, and `/enroll` (`"bad version"`).
+- `postedAt` (epoch milliseconds) must be at most 24 h in the past and 1 h in
+  the future of the Mac's clock (`"stale timestamp"`).
+- Field lengths: `key`/`pkg` ≤ 256, `appName` ≤ 128, `title` ≤ 512,
+  `text` ≤ 4096, `caller` ≤ 256 characters (`"bad field"`).
+- `iconHash` is `""` or exactly `sha256:` + 64 lowercase hex.
+- `/icon` uploads must be ≤ 512 KiB, start with the PNG signature, and hash
+  (SHA-256) to exactly `iconHash` (`"bad icon"` / `"hash mismatch"`).
 
 ## Pairing QR payload (JSON, rendered as QR on the Mac)
 
@@ -116,8 +138,23 @@ the Mac banner never outlives its usefulness. A call answered *from the Mac*
 is the exception: it stays on screen, in its in-call form, until the call is
 actually over.
 
+### POST /enroll
+
+```json
+{"v":1,"cert":"<base64 DER of the phone's client certificate>"}
+```
+
+Registers the phone's mutual-TLS certificate. Accepted (`200 {}`) only while
+the Mac is in open mode; in locked mode it returns `403 {"error":"locked"}`,
+which an already-enrolled phone treats as success (reaching the endpoint at
+all required its certificate). Invalid DER gets `400 {"error":"bad cert"}`.
+The phone calls this once right after pairing and retries after any
+successful send until it succeeds; a new enrollment replaces the previous
+certificate (single-phone model).
+
 ## Errors
 
-- 401 bad/missing token, 400 malformed JSON, 404 unknown path.
+- 401 bad/missing token, 400 malformed JSON or failed validation (see
+  Validation), 403 enroll while locked, 404 unknown path, 405 non-POST.
 - 413 request body too large (cap 2 MiB).
 - The phone treats any failure as drop-and-forget (best effort, no queue).
