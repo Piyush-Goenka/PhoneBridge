@@ -1,6 +1,15 @@
 import XCTest
 @testable import PhoneBridgeCore
 
+// Simulates a Keychain that rejects the TLS private key, to prove the
+// temporary key file the generator writes never survives the failure.
+private final class KeyRejectingSecretStore: SecretStore {
+    func data(for account: String) -> Data? { nil }
+    func set(_ data: Data, for account: String) throws {
+        if account == Pairing.keyAccount { throw SecretStoreError.storeFailed(-1) }
+    }
+}
+
 final class PairingTests: XCTestCase {
     private var dir: URL!
 
@@ -64,6 +73,13 @@ final class PairingTests: XCTestCase {
         XCTAssertFalse(fm.fileExists(atPath: keyPath.path))
         XCTAssertFalse(fm.fileExists(atPath: tokenPath.path))
         XCTAssertNotNil(secrets.data(for: Pairing.keyAccount))
+    }
+
+    func testFailedKeyStoreLeavesNoTempKeyOnDisk() {
+        XCTAssertThrowsError(
+            try Pairing.ensure(directory: dir, secrets: KeyRejectingSecretStore()))
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: dir.appendingPathComponent("key.tmp.pem").path))
     }
 
     func testPrivateIPv4Recognition() {

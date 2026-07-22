@@ -1,4 +1,8 @@
 import XCTest
+import NIOCore
+import NIOHTTP1
+import NIOPosix
+import NIOSSL
 @testable import PhoneBridgeCore
 
 final class TrustAllDelegate: NSObject, URLSessionDelegate {
@@ -15,7 +19,67 @@ final class TrustAllDelegate: NSObject, URLSessionDelegate {
     }
 }
 
+private enum HandshakeProbeError: Error {
+    case closedBeforeHandshake
+    case timedOut
+}
+
+private final class HTTPResponseProbe: ChannelInboundHandler {
+    typealias InboundIn = HTTPClientResponsePart
+
+    private let promise: EventLoopPromise<Int>
+    private var completed = false
+    private var status: Int?
+
+    init(promise: EventLoopPromise<Int>) {
+        self.promise = promise
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        switch unwrapInboundIn(data) {
+        case .head(let head):
+            status = Int(head.status.code)
+        case .body:
+            break
+        case .end:
+            if let status { succeedIfPending(status) }
+        }
+    }
+
+    func errorCaught(context: ChannelHandlerContext, error: Error) {
+        failIfPending(error)
+        context.close(promise: nil)
+    }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        failIfPending(HandshakeProbeError.closedBeforeHandshake)
+        context.fireChannelInactive()
+    }
+
+    func timeOutIfPending() {
+        failIfPending(HandshakeProbeError.timedOut)
+    }
+
+    private func succeedIfPending(_ status: Int) {
+        guard !completed else { return }
+        completed = true
+        promise.succeed(status)
+    }
+
+    private func failIfPending(_ error: Error) {
+        guard !completed else { return }
+        completed = true
+        promise.fail(error)
+    }
+}
+
 final class ServerIntegrationTests: XCTestCase {
+    private struct ClientIdentity {
+        let certPath: URL
+        let keyPath: URL
+        let base64DER: String
+    }
+
     private var dir: URL!
     private var server: BridgeServer!
     private var sink: MockSink!
@@ -127,6 +191,91 @@ final class ServerIntegrationTests: XCTestCase {
         return der
     }
 
+    // Mirrors the Android Keystore identity: a P-256 self-signed leaf that is
+    // explicitly not a CA and may only be used for digital signatures.
+    private func makeECClientIdentity(in ownDir: URL) throws -> ClientIdentity {
+        let suffix = UUID().uuidString
+        let certPath = ownDir.appendingPathComponent("ec-client-cert-\(suffix).pem")
+        let keyPath = ownDir.appendingPathComponent("ec-client-key-\(suffix).pem")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/openssl")
+        process.arguments = [
+            "req", "-x509", "-newkey", "ec",
+            "-pkeyopt", "ec_paramgen_curve:P-256",
+            "-pkeyopt", "ec_param_enc:named_curve", "-nodes",
+            "-keyout", keyPath.path, "-out", certPath.path,
+            "-days", "1", "-subj", "/CN=PhoneBridgePhone",
+            "-addext", "basicConstraints=critical,CA:FALSE",
+            "-addext", "keyUsage=critical,digitalSignature",
+        ]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw PairingError.opensslFailed(process.terminationStatus)
+        }
+
+        let pem = try String(contentsOf: certPath, encoding: .utf8)
+        let base64DER = pem.components(separatedBy: "\n")
+            .filter { !$0.hasPrefix("-----") && !$0.isEmpty }
+            .joined()
+        return ClientIdentity(
+            certPath: certPath, keyPath: keyPath, base64DER: base64DER)
+    }
+
+    private func performClientCertificateHandshake(
+        port: Int, identity: ClientIdentity
+    ) throws -> Int {
+        var configuration = TLSConfiguration.makeClientConfiguration()
+        // The test trusts its freshly generated server certificate. Client
+        // authentication remains enabled independently below.
+        configuration.certificateVerification = .none
+        configuration.minimumTLSVersion = .tlsv12
+        configuration.certificateChain = try NIOSSLCertificate
+            .fromPEMFile(identity.certPath.path)
+            .map { .certificate($0) }
+        configuration.privateKey = .privateKey(try NIOSSLPrivateKey(
+            file: identity.keyPath.path, format: .pem))
+        let context = try NIOSSLContext(configuration: configuration)
+
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { try? group.syncShutdownGracefully() }
+        let response = group.next().makePromise(of: Int.self)
+        let probe = HTTPResponseProbe(promise: response)
+        let bootstrap = ClientBootstrap(group: group)
+            .connectTimeout(.seconds(3))
+            .channelInitializer { channel in
+                do {
+                    let tlsHandler = try NIOSSLClientHandler(
+                        context: context, serverHostname: nil)
+                    return channel.pipeline.addHandler(tlsHandler).flatMap {
+                        channel.pipeline.addHTTPClientHandlers()
+                    }.flatMap {
+                        channel.pipeline.addHandler(probe)
+                    }
+                } catch {
+                    return channel.eventLoop.makeFailedFuture(error)
+                }
+            }
+
+        let channel = try bootstrap.connect(host: "127.0.0.1", port: port).wait()
+        defer { try? channel.close().wait() }
+        let timeout = channel.eventLoop.scheduleTask(in: TimeAmount.seconds(3)) {
+            probe.timeOutIfPending()
+        }
+        defer { timeout.cancel() }
+
+        var headers = HTTPHeaders()
+        headers.add(name: "Host", value: "localhost")
+        headers.add(name: "Content-Length", value: "0")
+        let head = HTTPRequestHead(
+            version: .http1_1, method: .POST, uri: "/notify", headers: headers)
+        _ = channel.write(HTTPClientRequestPart.head(head))
+        _ = channel.writeAndFlush(HTTPClientRequestPart.end(nil))
+        return try response.futureResult.wait()
+    }
+
     private func post(to port: Int, path: String, auth: String?, body: String) async throws -> (Int, String) {
         var request = URLRequest(url: URL(string: "https://localhost:\(port)\(path)")!)
         request.httpMethod = "POST"
@@ -137,13 +286,16 @@ final class ServerIntegrationTests: XCTestCase {
     }
 
     func testEnrollAcceptedInOpenMode() async throws {
-        let (srv, _, certPath, token) = try startEnrollingServer(open: true)
+        let (srv, coordinator, certPath, token) = try startEnrollingServer(open: true)
         defer { srv.stop() }
+        let responseWriteCompleted = expectation(description: "enrollment response write completed")
+        coordinator.onEnrolled = { responseWriteCompleted.fulfill() }
         let certB64 = try sampleClientCertBase64(in: dir)
         let body = #"{"v":1,"cert":"\#(certB64)"}"#
         let (status, _) = try await post(to: srv.port, path: "/enroll", auth: "Bearer \(token)", body: body)
         XCTAssertEqual(status, 200)
         XCTAssertNotNil(PhoneCertStore.loadTrustRoot(at: certPath))
+        await fulfillment(of: [responseWriteCompleted], timeout: 1)
     }
 
     func testEnrollRejectsMissingToken() async throws {
@@ -161,6 +313,40 @@ final class ServerIntegrationTests: XCTestCase {
         let (status, _) = try await post(
             to: srv.port, path: "/enroll", auth: "Bearer \(token)", body: #"{"v":1,"cert":"!!!!"}"#)
         XCTAssertEqual(status, 400)
+    }
+
+    // Lock/unpair must sever connections that are already accepted, not just
+    // refuse new ones: a revoked client could otherwise keep its session (and
+    // the old handler's token) alive by trickling traffic under the 90 s
+    // idle timeout.
+    func testReloadClosesAlreadyAcceptedConnections() throws {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        defer { close(fd) }
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = in_port_t(UInt16(server.port).bigEndian)
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let rc = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        XCTAssertEqual(rc, 0)
+        // Give the event loop a beat to accept the connection.
+        Thread.sleep(forTimeInterval: 0.3)
+
+        try server.reload(mode: .open, phoneCertPath: nil)
+
+        // EOF (or reset) must arrive promptly; a 3 s silence means the old
+        // connection survived the reload.
+        var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        let ready = poll(&pfd, 1, 3000)
+        XCTAssertEqual(ready, 1, "connection stayed open after reload")
+        var byte: UInt8 = 0
+        let received = recv(fd, &byte, 1, MSG_DONTWAIT)
+        XCTAssertLessThanOrEqual(
+            received, 0, "expected EOF/reset after reload, got payload bytes")
     }
 
     // A no-client-cert session must fail the handshake once the server locks.
@@ -182,5 +368,35 @@ final class ServerIntegrationTests: XCTestCase {
         } catch {
             // Expected: TLS handshake failure, no client certificate presented.
         }
+    }
+
+    func testLockedModeAcceptsExactEnrolledNonCAClientCertificate() async throws {
+        let (srv, _, certPath, token) = try startEnrollingServer(open: true)
+        defer { srv.stop() }
+        let identity = try makeECClientIdentity(in: dir)
+        let (status, _) = try await post(
+            to: srv.port, path: "/enroll", auth: "Bearer \(token)",
+            body: #"{"v":1,"cert":"\#(identity.base64DER)"}"#)
+        XCTAssertEqual(status, 200)
+
+        try srv.reload(mode: .locked, phoneCertPath: certPath)
+        XCTAssertEqual(srv.mode, .locked)
+        XCTAssertEqual(try performClientCertificateHandshake(
+            port: srv.port, identity: identity), 401)
+    }
+
+    func testLockedModeRejectsDifferentClientCertificate() async throws {
+        let (srv, _, certPath, token) = try startEnrollingServer(open: true)
+        defer { srv.stop() }
+        let enrolledIdentity = try makeECClientIdentity(in: dir)
+        let (status, _) = try await post(
+            to: srv.port, path: "/enroll", auth: "Bearer \(token)",
+            body: #"{"v":1,"cert":"\#(enrolledIdentity.base64DER)"}"#)
+        XCTAssertEqual(status, 200)
+
+        try srv.reload(mode: .locked, phoneCertPath: certPath)
+        let differentIdentity = try makeECClientIdentity(in: dir)
+        XCTAssertThrowsError(try performClientCertificateHandshake(
+            port: srv.port, identity: differentIdentity))
     }
 }

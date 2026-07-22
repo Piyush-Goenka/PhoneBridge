@@ -66,9 +66,11 @@ public enum Pairing {
         let tempKey = certPath.deletingLastPathComponent()
             .appendingPathComponent("key.tmp.pem")
         try generateCert(certPath: certPath, keyPath: tempKey)
+        // The generator can only hand the key over as a file; remove it on
+        // every exit so a failed Keychain write cannot leave a plaintext copy.
+        defer { try? fm.removeItem(at: tempKey) }
         let keyPEM = try Data(contentsOf: tempKey)
         try secrets.set(keyPEM, for: keyAccount)
-        try? fm.removeItem(at: tempKey)
         return keyPEM
     }
 

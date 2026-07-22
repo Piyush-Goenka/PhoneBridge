@@ -51,9 +51,24 @@ public struct EnrollPayload: Codable {
 public struct HandlerResult: Equatable {
     public let status: Int
     public let body: String
+    // Internal transport hook. The server invokes it after the complete
+    // response write, including the end frame, succeeds or fails.
+    let onResponseWriteCompleted: (() -> Void)?
+
     public init(status: Int, body: String) {
         self.status = status
         self.body = body
+        onResponseWriteCompleted = nil
+    }
+
+    init(status: Int, body: String, onResponseWriteCompleted: @escaping () -> Void) {
+        self.status = status
+        self.body = body
+        self.onResponseWriteCompleted = onResponseWriteCompleted
+    }
+
+    public static func == (lhs: HandlerResult, rhs: HandlerResult) -> Bool {
+        lhs.status == rhs.status && lhs.body == rhs.body
     }
 }
 
@@ -234,7 +249,9 @@ public final class RequestHandler {
             }
             switch enroller.enroll(certDer: der) {
             case .accepted:
-                return HandlerResult(status: 200, body: "{}")
+                return HandlerResult(status: 200, body: "{}") {
+                    enroller.enrollmentResponseWriteCompleted()
+                }
             case .locked:
                 return HandlerResult(status: 403, body: #"{"error":"locked"}"#)
             case .invalid:

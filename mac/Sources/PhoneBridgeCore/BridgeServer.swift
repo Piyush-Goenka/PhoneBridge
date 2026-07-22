@@ -9,13 +9,48 @@ public enum ServerMode: Equatable {
     case locked    // steady state: mutual TLS, only the enrolled phone gets in
 }
 
+// Registry of accepted connections. stop()/reload() must sever live sessions,
+// not just refuse new ones: mode switches and unpair are revocation points,
+// and a revoked client must not keep an old session alive by trickling
+// traffic under the idle timeout.
+final class ChildChannelTracker: @unchecked Sendable {
+    private let lock = NSLock()
+    private var channels: [ObjectIdentifier: Channel] = [:]
+
+    func add(_ channel: Channel) {
+        let id = ObjectIdentifier(channel)
+        lock.lock()
+        channels[id] = channel
+        lock.unlock()
+        channel.closeFuture.whenComplete { [weak self] _ in
+            guard let self else { return }
+            self.lock.lock()
+            self.channels.removeValue(forKey: id)
+            self.lock.unlock()
+        }
+    }
+
+    // Close every tracked connection and wait for the closes to land, so a
+    // caller that rotates credentials afterwards knows no old session remains.
+    func closeAllAndWait() {
+        lock.lock()
+        let open = Array(channels.values)
+        channels.removeAll()
+        lock.unlock()
+        for channel in open { channel.close(promise: nil) }
+        for channel in open { try? channel.closeFuture.wait() }
+    }
+}
+
 public final class BridgeServer {
     private let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     private var channel: Channel?
     public private(set) var port: Int = 0
+    public var isRunning: Bool { channel != nil }
     // Shared across every accepted connection so a flood cannot exhaust the
     // single event loop's file descriptors or memory (#5).
     private let limiter = ConnectionLimiter()
+    private let children = ChildChannelTracker()
     // Longer than the 45 s /call/wait hold plus its re-poll, so a legitimate
     // long-poll survives while a silent slow-loris connection is reaped.
     private static let idleTimeout = TimeAmount.seconds(90)
@@ -46,8 +81,9 @@ public final class BridgeServer {
 
     // Restart the listener with the other TLS context. The port is fixed and
     // SO_REUSEADDR is set, so the EADDRINUSE retry loop absorbs the brief
-    // overlap. In-flight requests are short except /call/wait, which the
-    // phone already treats as retryable.
+    // overlap. Live connections are severed along with the listener; the
+    // phone treats cut sends (including the /call/wait long-poll) as
+    // retryable, and a client from the old trust regime must not survive.
     public func reload(mode: ServerMode, phoneCertPath: URL?) throws {
         self.phoneCertPath = phoneCertPath
         stop()
@@ -57,15 +93,16 @@ public final class BridgeServer {
     private func bind(mode requested: ServerMode) throws {
         guard let handler else { return }
 
-        let sslContext = try makeContext(mode: requested)
+        let tlsSetup = try makeContext(mode: requested)
 
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
-            .childChannelInitializer { [limiter] channel in
+            .childChannelInitializer { [limiter, children] channel in
+                children.add(channel)
                 // Runs before TLS, cheapest checks first: drop internet-routed
                 // peers, then enforce the connection cap, then reap idle/slow
                 // connections, all before a handshake byte is processed.
-                channel.pipeline
+                return channel.pipeline
                     .addHandler(SourceGateHandler())
                     .flatMap { channel.pipeline.addHandler(ConnectionLimitHandler(limiter: limiter)) }
                     .flatMap {
@@ -73,7 +110,26 @@ public final class BridgeServer {
                             IdleStateHandler(allTimeout: Self.idleTimeout))
                     }
                     .flatMap { channel.pipeline.addHandler(IdleCloseHandler()) }
-                    .flatMap { channel.pipeline.addHandler(NIOSSLServerHandler(context: sslContext)) }
+                    .flatMap {
+                        let tlsHandler: NIOSSLServerHandler
+                        if let expectedLeafDER = tlsSetup.expectedClientLeafDER {
+                            // The phone certificate is a self-signed end-entity
+                            // certificate, not a CA. Normal trust-root validation
+                            // therefore rejects it even when that exact certificate
+                            // is enrolled. Pin the presented leaf instead; TLS still
+                            // verifies CertificateVerify, so the peer must also prove
+                            // possession of the corresponding private key.
+                            tlsHandler = NIOSSLServerHandler(
+                                context: tlsSetup.context,
+                                customVerificationCallback: { chain, promise in
+                                    promise.succeed(Self.verifyPinnedLeaf(
+                                        chain, expectedDER: expectedLeafDER))
+                                })
+                        } else {
+                            tlsHandler = NIOSSLServerHandler(context: tlsSetup.context)
+                        }
+                        return channel.pipeline.addHandler(tlsHandler)
+                    }
                     .flatMap { channel.pipeline.configureHTTPServerPipeline() }
                     .flatMap { channel.pipeline.addHandler(HTTPHandler(handler: handler)) }
             }
@@ -104,7 +160,9 @@ public final class BridgeServer {
             ? .locked : .open
     }
 
-    private func makeContext(mode: ServerMode) throws -> NIOSSLContext {
+    private func makeContext(mode: ServerMode) throws -> (
+        context: NIOSSLContext, expectedClientLeafDER: [UInt8]?
+    ) {
         guard let certPath, let keyPEM else { throw PairingError.badPEM }
         let certs = try NIOSSLCertificate.fromPEMFile(certPath.path)
             .map { NIOSSLCertificateSource.certificate($0) }
@@ -113,6 +171,7 @@ public final class BridgeServer {
             certificateChain: certs, privateKey: .privateKey(key))
         // TLS 1.0/1.1 are obsolete; the phone client speaks 1.2+.
         tls.minimumTLSVersion = .tlsv12
+        var expectedClientLeafDER: [UInt8]?
 
         if mode == .locked,
            let phoneCertPath,
@@ -122,14 +181,29 @@ public final class BridgeServer {
             // for any verification mode other than .none, so a client with no
             // cert (or a different one) is dropped at the handshake.
             tls.certificateVerification = .noHostnameVerification
+            // Keep the trust store minimal. The per-connection verification
+            // callback is authoritative because this enrolled leaf is not a CA.
             tls.trustRoots = .certificates([phoneCert])
+            expectedClientLeafDER = try phoneCert.toDERBytes()
         }
-        return try NIOSSLContext(configuration: tls)
+        return (try NIOSSLContext(configuration: tls), expectedClientLeafDER)
+    }
+
+    private static func verifyPinnedLeaf(
+        _ chain: [NIOSSLCertificate], expectedDER: [UInt8]
+    ) -> NIOSSLVerificationResult {
+        guard let leaf = chain.first,
+              let actualDER = try? leaf.toDERBytes(),
+              actualDER == expectedDER else {
+            return .failed
+        }
+        return .certificateVerified
     }
 
     public func stop() {
         try? channel?.close().wait()
         channel = nil
+        children.closeAllAndWait()
     }
 }
 
@@ -286,7 +360,9 @@ final class HTTPHandler: ChannelInboundHandler {
                         name: "Content-Length", value: String(responseBody.readableBytes))
                     ctx.write(self.wrapOutboundOut(.head(responseHead)), promise: nil)
                     ctx.write(self.wrapOutboundOut(.body(.byteBuffer(responseBody))), promise: nil)
-                    ctx.writeAndFlush(self.wrapOutboundOut(.end(nil)), promise: nil)
+                    ctx.writeAndFlush(self.wrapOutboundOut(.end(nil))).whenComplete { _ in
+                        result.onResponseWriteCompleted?()
+                    }
                 }
             }
         }

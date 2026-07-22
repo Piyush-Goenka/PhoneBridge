@@ -29,12 +29,13 @@ public struct HistoryEntry: Codable, Equatable, Identifiable {
     }
 }
 
-// Rolling on-disk log of mirrored notifications, newest first. This is the
-// Mac-side history now that cards replaced Notification Center.
+// Rolling log of mirrored notifications, newest first. It is stored on disk
+// only when the caller supplies an available at-rest encryption key.
 public final class NotificationHistory {
     private let fileURL: URL
     private let cap: Int
     private let cipher: HistoryCipher
+    private let persistenceEnabled: Bool
     private let lock = NSLock()
     private var stored: [HistoryEntry]
 
@@ -42,16 +43,26 @@ public final class NotificationHistory {
 
     // Retention is deliberately short: only the most recent notifications are
     // worth keeping, and a smaller on-disk footprint means less to protect.
-    public init(fileURL: URL, cap: Int = 20, cipher: HistoryCipher = PlaintextHistoryCipher()) {
+    public init(
+        fileURL: URL, cap: Int = 20,
+        cipher: HistoryCipher = PlaintextHistoryCipher(),
+        persistenceEnabled: Bool = true
+    ) {
         self.fileURL = fileURL
         self.cap = cap
         self.cipher = cipher
-        if let data = try? Data(contentsOf: fileURL),
-           let plaintext = try? cipher.open(data),
-           let entries = try? JSONDecoder().decode([HistoryEntry].self, from: plaintext) {
-            stored = Array(entries.prefix(cap))
-        } else {
-            stored = []
+        self.persistenceEnabled = persistenceEnabled
+        stored = []
+        if persistenceEnabled, let data = try? Data(contentsOf: fileURL) {
+            if let plaintext = try? cipher.open(data),
+               let entries = try? JSONDecoder().decode([HistoryEntry].self, from: plaintext) {
+                stored = Array(entries.prefix(cap))
+            } else {
+                // Unreadable with the current key: at best stale, at worst a
+                // plaintext leftover from an older build. Remove it rather
+                // than leaving it on disk.
+                try? FileManager.default.removeItem(at: fileURL)
+            }
         }
     }
 
@@ -143,6 +154,7 @@ public final class NotificationHistory {
     }
 
     private func save(_ entries: [HistoryEntry]) {
+        guard persistenceEnabled else { return }
         guard let plaintext = try? JSONEncoder().encode(entries),
               let data = try? cipher.seal(plaintext) else { return }
         try? FileManager.default.createDirectory(

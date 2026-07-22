@@ -1,6 +1,7 @@
 package com.piyush.phonebridge.relay
 
 import android.app.Notification
+import android.content.ComponentName
 import android.content.Context
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
@@ -9,9 +10,11 @@ import android.util.Base64
 import com.piyush.phonebridge.filter.DedupCache
 import com.piyush.phonebridge.filter.NotificationFilter
 import com.piyush.phonebridge.model.RelayNotification
+import com.piyush.phonebridge.net.ClientIdentity
 import com.piyush.phonebridge.net.Enrollment
 import com.piyush.phonebridge.net.HostResolver
 import com.piyush.phonebridge.net.MacClient
+import com.piyush.phonebridge.net.MacClientCacheKey
 import com.piyush.phonebridge.pairing.PairingStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -39,16 +42,42 @@ class NotificationRelayService : NotificationListenerService() {
         Collections.synchronizedSet(HashSet())
 
     private var client: MacClient? = null
-    private var clientToken: String? = null
+    private var clientKey: MacClientCacheKey? = null
+    private val clientLock = Any()
+    private val identityChangeListener: () -> Unit = { invalidateCachedClient() }
     private val resolver by lazy { HostResolver(this) }
+
+    override fun onCreate() {
+        super.onCreate()
+        ClientIdentity.addChangeListener(identityChangeListener)
+    }
 
     override fun onDestroy() {
         scope.cancel()
+        ClientIdentity.removeChangeListener(identityChangeListener)
+        invalidateCachedClient()
         super.onDestroy()
+    }
+
+    override fun onListenerDisconnected() {
+        super.onListenerDisconnected()
+        // Android may otherwise leave a granted listener disconnected behind
+        // an increasing restart backoff until the app is opened manually.
+        requestRebind(ComponentName(this, NotificationRelayService::class.java))
     }
 
     private fun defaultDialerPackage(): String? =
         (getSystemService(Context.TELECOM_SERVICE) as TelecomManager).defaultDialerPackage
+
+    // Delivery diagnostics (failure reasons, resolved hosts) stay out of
+    // release logcat, mirroring HostResolver's gating.
+    private val debuggable by lazy {
+        applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0
+    }
+
+    private fun debugLog(message: String) {
+        if (debuggable) android.util.Log.d("PhoneBridge", message)
+    }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         scope.launch {
@@ -56,13 +85,6 @@ class NotificationRelayService : NotificationListenerService() {
             if (!store.isPaired || !store.mirroringEnabled) return@launch
 
             val notification = extract(sbn)
-            android.util.Log.d(
-                "PhoneBridge",
-                "posted pkg=${sbn.packageName} key=${sbn.key} " +
-                    "ongoing=${sbn.isOngoing} flags=0x${Integer.toHexString(sbn.notification.flags)} " +
-                    "category=${sbn.notification.category} " +
-                    "titleLen=${notification?.title?.length} textLen=${notification?.text?.length} " +
-                    "extracted=${notification != null}")
             if (notification == null) return@launch
 
             // Only the real phone app gets the call treatment. VoIP apps like
@@ -107,15 +129,12 @@ class NotificationRelayService : NotificationListenerService() {
             }
 
             if (!NotificationFilter.shouldForward(notification, store.allowlist)) {
-                android.util.Log.d("PhoneBridge", "dropped by filter: key=${sbn.key}")
                 return@launch
             }
             if (dedup.isDuplicate(notification, System.currentTimeMillis())) {
-                android.util.Log.d("PhoneBridge", "dropped as duplicate: key=${sbn.key}")
                 return@launch
             }
 
-            android.util.Log.d("PhoneBridge", "delivering: key=${sbn.key}")
             deliver(notification, store)
         }
     }
@@ -172,14 +191,17 @@ class NotificationRelayService : NotificationListenerService() {
         }
 
         if (result is MacClient.SendResult.Failed) {
+            debugLog("deliver: POST to $host:$port failed: ${result.reason}")
             val rediscovered = resolver.rediscover(store)
             if (rediscovered == null) {
+                debugLog("deliver: rediscover found nothing, dropping")
                 SendLog.add(n.appName, n.title, "dropped: Mac not found")
                 return
             }
             host = rediscovered.first
             port = rediscovered.second
             result = macClient.postNotify(host, port, body)
+            debugLog("deliver: retry via $host:$port -> $result")
         }
 
         when (result) {
@@ -235,11 +257,13 @@ class NotificationRelayService : NotificationListenerService() {
             MacClient.SendResult.Failed("no cached host")
         }
         if (posted !is MacClient.SendResult.Ok) {
+            debugLog("call: POST to $host:$port failed: $posted")
             val rediscovered = resolver.rediscover(store)
             if (rediscovered != null) {
                 host = rediscovered.first
                 port = rediscovered.second
                 posted = macClient.postCall(host, port, callBody)
+                debugLog("call: retry via $host:$port -> $posted")
             }
         }
         if (posted !is MacClient.SendResult.Ok || host == null) {
@@ -385,12 +409,25 @@ class NotificationRelayService : NotificationListenerService() {
 
     private fun clientFor(store: PairingStore): MacClient? {
         val token = store.token ?: return null
-        val fingerprint = store.fingerprint ?: return null
-        if (client == null || clientToken != token) {
-            client = MacClient(token, fingerprint)
-            clientToken = token
+        val macFingerprint = store.fingerprint ?: return null
+        val identity = ClientIdentity.tlsMaterial() ?: return null
+        val key = MacClientCacheKey(token, macFingerprint, identity.fingerprint)
+        synchronized(clientLock) {
+            if (client == null || clientKey != key) {
+                client?.close()
+                client = MacClient(token, macFingerprint, identity)
+                clientKey = key
+            }
+            return client
         }
-        return client
+    }
+
+    private fun invalidateCachedClient() {
+        synchronized(clientLock) {
+            client?.close()
+            client = null
+            clientKey = null
+        }
     }
 
     private fun extract(sbn: StatusBarNotification): RelayNotification? {

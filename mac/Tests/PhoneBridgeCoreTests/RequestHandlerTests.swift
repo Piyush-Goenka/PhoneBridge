@@ -29,6 +29,21 @@ final class MockCallSink: CallSink {
     func endCall(key: String) { ended.append(key) }
 }
 
+final class MockPhoneEnroller: PhoneEnroller {
+    var outcome: EnrollmentOutcome = .accepted
+    var enrollCount = 0
+    var flushedCount = 0
+
+    func enroll(certDer: Data) -> EnrollmentOutcome {
+        enrollCount += 1
+        return outcome
+    }
+
+    func enrollmentResponseWriteCompleted() {
+        flushedCount += 1
+    }
+}
+
 final class RequestHandlerTests: XCTestCase {
     private var icons: MockIconStore!
     private var sink: MockSink!
@@ -201,6 +216,43 @@ final class RequestHandlerTests: XCTestCase {
     func testUnknownPathIs404() {
         let r = post("/whatever", auth: "Bearer secret", body: "{}")
         XCTAssertEqual(r.status, 404)
+    }
+
+    func testAcceptedEnrollmentDefersRelockUntilResponseWriteCompletes() {
+        let enroller = MockPhoneEnroller()
+        let enrollingHandler = RequestHandler(
+            token: "secret", icons: icons, sink: sink,
+            calls: registry, callSink: callSink, enroller: enroller)
+        let cert = Data([0x01]).base64EncodedString()
+
+        let result = enrollingHandler.handle(
+            path: "/enroll", authorization: "Bearer secret",
+            body: Data(#"{"v":1,"cert":"\#(cert)"}"#.utf8))
+
+        XCTAssertEqual(result.status, 200)
+        XCTAssertEqual(enroller.enrollCount, 1)
+        XCTAssertEqual(enroller.flushedCount, 0)
+        XCTAssertNotNil(result.onResponseWriteCompleted)
+
+        result.onResponseWriteCompleted?()
+        XCTAssertEqual(enroller.flushedCount, 1)
+    }
+
+    func testRejectedEnrollmentHasNoResponseWriteCompletionHook() {
+        let enroller = MockPhoneEnroller()
+        enroller.outcome = .locked
+        let enrollingHandler = RequestHandler(
+            token: "secret", icons: icons, sink: sink,
+            calls: registry, callSink: callSink, enroller: enroller)
+        let cert = Data([0x01]).base64EncodedString()
+
+        let result = enrollingHandler.handle(
+            path: "/enroll", authorization: "Bearer secret",
+            body: Data(#"{"v":1,"cert":"\#(cert)"}"#.utf8))
+
+        XCTAssertEqual(result.status, 403)
+        XCTAssertNil(result.onResponseWriteCompleted)
+        XCTAssertEqual(enroller.flushedCount, 0)
     }
 
     func testCallShowsActionableBanner() {

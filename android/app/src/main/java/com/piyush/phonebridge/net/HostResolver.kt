@@ -3,6 +3,7 @@ package com.piyush.phonebridge.net
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.content.pm.ApplicationInfo
 import android.util.Log
 import com.piyush.phonebridge.pairing.PairingStore
 import java.net.Inet4Address
@@ -33,39 +34,48 @@ class HostResolver(private val context: Context) {
             // AND port, breaking the sweep too. Only trust it after the pinned
             // certificate check passes, exactly like the sweep path below.
             if (SweepProber(fingerprint).findMac(listOf(host), port) != null) {
-                Log.d("PhoneBridge", "rediscover: mDNS verified $host:$port")
+                debugLog("rediscover: mDNS verified $host:$port")
                 store.host = host
                 store.port = port
                 lastSweepFailureAt = 0L
                 return host to port
             }
-            Log.d("PhoneBridge", "rediscover: mDNS $host:$port failed pin check, ignoring")
+            debugLog("rediscover: mDNS $host:$port failed pin check, ignoring")
         }
 
         if (!SweepPlan.shouldSweep(now, lastSweepFailureAt)) {
-            Log.d("PhoneBridge", "rediscover: sweep on cooldown")
+            debugLog("rediscover: sweep on cooldown")
             return null
         }
         val (ownIp, prefix) = wifiIpv4() ?: run {
-            Log.d("PhoneBridge", "rediscover: not on Wi-Fi, no sweep")
+            debugLog("rediscover: not on Wi-Fi, no sweep")
             return null
         }
         if (!SweepPlan.isPrivateIpv4(ownIp)) return null
         val candidates = SweepPlan.candidates(ownIp, prefix, store.host)
         if (candidates.isEmpty()) return null
 
-        Log.d("PhoneBridge", "rediscover: sweeping ${candidates.size} hosts on port ${store.port}")
+        debugLog("rediscover: sweeping ${candidates.size} hosts on port ${store.port}")
         val found = SweepProber(fingerprint).findMac(candidates, store.port)
         return if (found != null) {
-            Log.d("PhoneBridge", "rediscover: sweep found Mac at $found")
+            debugLog("rediscover: sweep found Mac at $found")
             store.host = found
             lastSweepFailureAt = 0L
             found to store.port
         } else {
-            Log.d("PhoneBridge", "rediscover: sweep found nothing, cooldown armed")
+            debugLog("rediscover: sweep found nothing, cooldown armed")
             lastSweepFailureAt = now
             null
         }
+    }
+
+    // Discovery diagnostics carry LAN addresses and ports; keep them out
+    // of release logcat.
+    private val debuggable =
+        context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
+
+    private fun debugLog(message: String) {
+        if (debuggable) Log.d("PhoneBridge", message)
     }
 
     // The phone's IPv4 and prefix length on the active Wi-Fi network,

@@ -3,6 +3,8 @@ package com.piyush.phonebridge.ui
 import android.Manifest
 import android.app.NotificationManager
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Bundle
 import android.provider.Settings
 import android.widget.Toast
@@ -16,6 +18,7 @@ import com.journeyapps.barcodescanner.ScanOptions
 import com.piyush.phonebridge.net.ClientIdentity
 import com.piyush.phonebridge.net.Enrollment
 import com.piyush.phonebridge.net.HostResolver
+import com.piyush.phonebridge.net.LocalAddressPolicy
 import com.piyush.phonebridge.net.MacClient
 import com.piyush.phonebridge.net.SweepProber
 import com.piyush.phonebridge.pairing.PairingStore
@@ -69,23 +72,34 @@ class MainActivity : ComponentActivity() {
     private fun verifyAndPair(payload: QrPayload) {
         verifyingPairing.value = true
         uiScope.launch {
-            val reachable = withContext(Dispatchers.IO) {
-                SweepProber(payload.fingerprint)
-                    .findMac(listOf(payload.host), payload.port) != null
+            val verifiedHost = withContext(Dispatchers.IO) {
+                if (!hasActiveWifi()) return@withContext null
+                val candidates = LocalAddressPolicy.resolveAllowed(payload.host)
+                SweepProber(payload.fingerprint).findMac(candidates, payload.port)
             }
             verifyingPairing.value = false
-            if (!reachable) {
+            if (verifiedHost == null) {
                 pairingError.value = "Couldn't reach that Mac. Make sure it is the " +
                     "PhoneBridge Mac on the same Wi-Fi, then scan again."
                 return@launch
             }
+            // Persist the private address that passed the pin check, not the
+            // untrusted hostname from the QR (which could later DNS-rebind).
+            val verifiedPayload = payload.copy(host = verifiedHost)
             val existing = store.fingerprint
-            if (store.isPaired && existing != null && existing != payload.fingerprint) {
-                pendingPairing.value = payload
+            if (store.isPaired && existing != null && existing != verifiedPayload.fingerprint) {
+                pendingPairing.value = verifiedPayload
             } else {
-                commitPairing(payload)
+                commitPairing(verifiedPayload)
             }
         }
+    }
+
+    private fun hasActiveWifi(): Boolean {
+        val connectivity = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+        val active = connectivity.activeNetwork ?: return false
+        return connectivity.getNetworkCapabilities(active)
+            ?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
     }
 
     private fun commitPairing(payload: QrPayload) {
@@ -205,16 +219,30 @@ class MainActivity : ComponentActivity() {
         reachabilityJob?.cancel()
         macReachable.value = null
         if (!store.isPaired) return
+        val token = store.token ?: return
         val fingerprint = store.fingerprint ?: return
         reachabilityJob = uiScope.launch {
             val reachable = withContext(Dispatchers.IO) {
                 val prober = SweepProber(fingerprint)
-                val cachedHit = store.host?.let {
+                val cached = store.host?.takeIf {
                     prober.findMac(listOf(it), store.port) != null
-                } ?: false
-                cachedHit || HostResolver(this@MainActivity).rediscover(store)
-                    ?.let { (host, port) -> prober.findMac(listOf(host), port) != null }
-                    ?: false
+                }?.let { it to store.port }
+                val destination = cached
+                    ?: HostResolver(this@MainActivity).rediscover(store)
+                if (destination != null) {
+                    // Opening the Mac's pairing QR switches it to enrollment
+                    // mode. Reopening this app can now repair a rotated client
+                    // identity immediately, without waiting for another phone
+                    // notification or forcing a second QR scan.
+                    Enrollment.ensure(
+                        store,
+                        MacClient(token, fingerprint),
+                        destination.first,
+                        destination.second,
+                    )
+                } else {
+                    false
+                }
             }
             macReachable.value = reachable
         }

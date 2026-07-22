@@ -24,13 +24,42 @@ mDNS answer therefore cannot poison the cache.
   exactly the enrolled certificate, so unknown peers never reach HTTP. The Mac
   runs **open** (no client cert required) only while no phone is enrolled or
   the pairing QR window is showing.
+- The phone certificate is a pinned end-entity leaf, not a CA certificate.
+  Locked-mode verification byte-compares the presented leaf DER with the
+  enrolled DER, while the TLS `CertificateVerify` step proves possession of
+  its private key. Ordinary CA-path validation must not be used for this pin.
+- The Android key authorizes raw ECDSA (`DIGEST_NONE`) because the TLS stack
+  hashes the handshake before asking Android Keystore to sign it. The app
+  validates that operation before use and replaces legacy keys that cannot
+  perform it. Enrollment and cached TLS clients are keyed by the exact client
+  certificate fingerprint, so replacing a key always requires re-enrollment.
 - Every request carries `Authorization: Bearer <token>`. Missing or wrong token
   gets `401 {"error":"unauthorized"}`.
+- Pairing is accepted only while Android has an active Wi-Fi network and the
+  QR host resolves to an RFC 1918, link-local, unique-local IPv6, or CGNAT
+  address. The phone stores the numeric address that passed pinned TLS, not
+  the untrusted QR hostname.
 - All endpoints accept only POST; other methods get
   `405 {"error":"method not allowed"}`.
 - Unpairing on the Mac deletes the enrolled phone certificate and mints a new
-  token, so an old QR photograph or a leaked token stops working. The phone's
+  token, so an old QR photograph or a leaked token stops working. The listener
+  is stopped before revocation and stays down if any step fails. The phone's
   Unpair wipes its pairing and its Keystore client identity.
+- Stopping or restarting the listener (unpair, open/locked mode switches)
+  also severs every already-accepted connection, so a session from the old
+  trust regime cannot outlive it by keeping traffic inside the idle window.
+- The token, TLS private key, and history-encryption key are stored in the Mac
+  Keychain. Notification history is AES-GCM encrypted at rest; if the history
+  key cannot be obtained, history becomes memory-only instead of falling back
+  to plaintext. A history file that no longer decrypts is deleted at startup
+  rather than left on disk. Android pairing data is stored in encrypted
+  preferences and the client private key remains non-exportable in Android
+  Keystore.
+- Android migrates an older plaintext pairing, allowlist, and mirroring toggles
+  into encrypted preferences once, then removes the plaintext copy only after
+  the encrypted write succeeds. APK replacement and listener disconnection
+  both request an immediate notification-listener rebind so updates do not
+  leave mirroring stuck behind Android's service restart backoff.
 
 ## Server limits (defense in depth)
 
@@ -63,10 +92,22 @@ fields before sending so real notifications are trimmed, not dropped.
 ```
 
 Before committing a scanned payload the phone verifies it points at a real Mac
-holding the scanned certificate (one pinned-TLS probe against host:port). If
-that fails it refuses and asks the user to rescan. If it succeeds but the
-fingerprint differs from an existing pairing, the phone asks the user to
-confirm replacing their current Mac before redirecting notifications.
+holding the scanned certificate. It requires active Wi-Fi, resolves the QR host,
+rejects public/loopback/unspecified addresses, and probes only the accepted local
+addresses. If that fails it refuses and asks the user to rescan. If it succeeds
+but the fingerprint differs from an existing pairing, the phone asks the user
+to confirm replacing their current Mac before redirecting notifications.
+
+## Intentional bounded tradeoffs
+
+- A missing or corrupt enrolled-phone certificate is treated as no enrollment,
+  reopening pairing so a local user can recover without editing application
+  files. This assumes an attacker who can alter the app's private support files
+  already has the logged-in user's filesystem access.
+- HTTP request bodies are capped at 2 MiB but are buffered before bearer-token
+  validation. The private-source gate, 64-total/8-per-IP connection caps, and
+  idle timeout bound this LAN-only exposure; there is no separate request-rate
+  limiter.
 
 ## Endpoints (all POST, JSON bodies, JSON responses)
 
@@ -174,7 +215,11 @@ which an already-enrolled phone treats as success (reaching the endpoint at
 all required its certificate). Invalid DER gets `400 {"error":"bad cert"}`.
 The phone calls this once right after pairing and retries after any
 successful send until it succeeds; a new enrollment replaces the previous
-certificate (single-phone model).
+certificate (single-phone model). The Mac writes and flushes the `200` response
+before restarting its listener in locked mode; even a failed response write
+still completes the lock transition. If an upgrade replaces an incompatible
+legacy phone key, opening the Mac pairing QR and reopening the phone app is the
+physical-consent recovery path for enrolling the replacement certificate.
 
 ## Errors
 

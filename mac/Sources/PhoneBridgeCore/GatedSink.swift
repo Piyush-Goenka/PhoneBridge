@@ -1,7 +1,15 @@
 import Foundation
 
 public final class GatedSink: NotificationSink, CallSink {
-    public var enabled = true
+    // Flipped from the UI thread, read on the server's event loop for every
+    // incoming notification: guarded so a toggle is always seen promptly and
+    // the cross-thread access is well-defined.
+    private let lock = NSLock()
+    private var _enabled = true
+    public var enabled: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return _enabled }
+        set { lock.lock(); _enabled = newValue; lock.unlock() }
+    }
     private let inner: NotificationSink
     private let callInner: CallSink?
 

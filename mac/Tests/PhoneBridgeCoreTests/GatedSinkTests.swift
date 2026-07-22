@@ -21,6 +21,19 @@ final class GatedSinkTests: XCTestCase {
         XCTAssertTrue(inner.shown.isEmpty)
     }
 
+    // enabled is written from the UI thread and read on server threads for
+    // every incoming notification. This pins that cross-thread use (data
+    // races surface under Thread Sanitizer) and that the last write wins.
+    func testEnabledToggleAcrossThreadsSettles() {
+        let gated = GatedSink(wrapping: MockSink())
+        DispatchQueue.concurrentPerform(iterations: 64) { index in
+            gated.enabled = index % 2 == 0
+            _ = gated.enabled
+        }
+        gated.enabled = false
+        XCTAssertFalse(gated.enabled)
+    }
+
     func testAlwaysForwardsDismiss() {
         let inner = MockSink()
         let gated = GatedSink(wrapping: inner)

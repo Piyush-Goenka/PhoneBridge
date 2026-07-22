@@ -4,8 +4,61 @@ import android.content.Context
 import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import com.piyush.phonebridge.net.ClientIdentityMetadata
 
 class PairingStore(context: Context) {
+
+    companion object {
+        private const val LEGACY_PREFS = "pairing"
+        private const val SECURE_PREFS = "pairing.secure"
+        private const val MIGRATION_COMPLETE = "legacyMigrationComplete"
+        private const val LEGACY_CLIENT_ENROLLED = "clientEnrolled"
+        private const val ENROLLED_CLIENT_FINGERPRINT = "enrolledClientFingerprint"
+
+        // clientEnrolled intentionally is not migrated: it did not exist in
+        // the plaintext store, and a newly restored pairing must enroll its
+        // current Keystore identity before claiming mutual TLS is ready.
+        private val migratableKeys = setOf(
+            "token", "fingerprint", "host", "port", "allowlist",
+            "mirroring", "mirrorCalls",
+        )
+
+        internal fun keysToMigrate(
+            legacyKeys: Set<String>,
+            secureKeys: Set<String>,
+        ): Set<String> {
+            if (MIGRATION_COMPLETE in secureKeys) return emptySet()
+            return legacyKeys.intersect(migratableKeys) - secureKeys
+        }
+
+        private fun migrateLegacy(context: Context, secure: SharedPreferences) {
+            synchronized(PairingStore::class.java) {
+                val legacy = context.getSharedPreferences(LEGACY_PREFS, Context.MODE_PRIVATE)
+                val secureKeys = secure.all.keys
+                if (MIGRATION_COMPLETE in secureKeys) return
+
+                val legacyValues = legacy.all
+                val editor = secure.edit()
+                for (key in keysToMigrate(legacyValues.keys, secureKeys)) {
+                    when (val value = legacyValues[key]) {
+                        is String -> editor.putString(key, value)
+                        is Int -> editor.putInt(key, value)
+                        is Boolean -> editor.putBoolean(key, value)
+                        is Set<*> -> editor.putStringSet(
+                            key, value.filterIsInstance<String>().toSet())
+                    }
+                }
+                editor.putBoolean(MIGRATION_COMPLETE, true)
+
+                // Delete the plaintext copy only after the encrypted write is
+                // durably committed. A failed commit leaves it available for
+                // another migration attempt instead of losing the pairing.
+                if (editor.commit() && legacyValues.isNotEmpty()) {
+                    legacy.edit().clear().apply()
+                }
+            }
+        }
+    }
 
     // Token, fingerprint, and host live in an AES-256 encrypted store whose
     // key is held in the Android Keystore (hardware-backed where available),
@@ -16,11 +69,11 @@ class PairingStore(context: Context) {
             .build()
         EncryptedSharedPreferences.create(
             context.applicationContext,
-            "pairing.secure",
+            SECURE_PREFS,
             masterKey,
             EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
-        )
+        ).also { migrateLegacy(context.applicationContext, it) }
     }
 
     var token: String?
@@ -51,21 +104,44 @@ class PairingStore(context: Context) {
         get() = prefs.getBoolean("mirrorCalls", false)
         set(value) = prefs.edit().putBoolean("mirrorCalls", value).apply()
 
-    // Whether this phone's client certificate has been enrolled on the Mac
-    // (mutual TLS). Reset on every fresh pairing so a new Mac re-enrolls.
-    var clientEnrolled: Boolean
-        get() = prefs.getBoolean("clientEnrolled", false)
-        set(value) = prefs.edit().putBoolean("clientEnrolled", value).apply()
+    // Enrollment belongs to one exact client certificate. The old Boolean
+    // survived a Keystore identity rotation and incorrectly skipped /enroll;
+    // comparing fingerprints makes a repaired or replaced key enroll again.
+    fun isClientEnrolled(clientFingerprint: String): Boolean =
+        ClientIdentityMetadata.enrollmentMatches(
+            prefs.getString(ENROLLED_CLIENT_FINGERPRINT, null),
+            clientFingerprint,
+        )
+
+    fun markClientEnrolled(clientFingerprint: String) {
+        prefs.edit()
+            .putString(ENROLLED_CLIENT_FINGERPRINT, clientFingerprint.lowercase())
+            .remove(LEGACY_CLIENT_ENROLLED)
+            .apply()
+    }
+
+    fun clearClientEnrollment() {
+        prefs.edit()
+            .remove(ENROLLED_CLIENT_FINGERPRINT)
+            .remove(LEGACY_CLIENT_ENROLLED)
+            .apply()
+    }
 
     val isPaired: Boolean
         get() = token != null && fingerprint != null
 
     fun apply(qr: QrPayload) {
-        token = qr.token
-        fingerprint = qr.fingerprint
-        host = qr.host
-        port = qr.port
-        clientEnrolled = false
+        // Change the destination and clear its enrollment marker atomically;
+        // the listener must never observe new pairing credentials with the old
+        // Mac's enrollment state.
+        prefs.edit()
+            .putString("token", qr.token)
+            .putString("fingerprint", qr.fingerprint)
+            .putString("host", qr.host)
+            .putInt("port", qr.port)
+            .remove(ENROLLED_CLIENT_FINGERPRINT)
+            .remove(LEGACY_CLIENT_ENROLLED)
+            .apply()
     }
 
     // Forget the paired Mac. Leaves user preferences (allowlist, toggles)
@@ -76,7 +152,8 @@ class PairingStore(context: Context) {
             .remove("fingerprint")
             .remove("host")
             .remove("port")
-            .remove("clientEnrolled")
+            .remove(ENROLLED_CLIENT_FINGERPRINT)
+            .remove(LEGACY_CLIENT_ENROLLED)
             .apply()
     }
 }

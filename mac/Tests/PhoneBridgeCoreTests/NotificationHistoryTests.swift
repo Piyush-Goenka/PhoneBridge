@@ -4,6 +4,12 @@ import XCTest
 final class NotificationHistoryTests: XCTestCase {
     private var fileURL: URL!
 
+    func testAdHocOrUnknownSignatureDisablesKeychainHistoryPersistence() {
+        XCTAssertFalse(KeychainHistoryCipher.permitsPersistence(signingFlags: nil))
+        XCTAssertFalse(KeychainHistoryCipher.permitsPersistence(signingFlags: 0x0002))
+        XCTAssertTrue(KeychainHistoryCipher.permitsPersistence(signingFlags: 0))
+    }
+
     override func setUp() {
         fileURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("history-tests-" + UUID().uuidString)
@@ -41,6 +47,41 @@ final class NotificationHistoryTests: XCTestCase {
         history.record(payload(key: "a", title: "kept"))
         let reloaded = NotificationHistory(fileURL: fileURL)
         XCTAssertEqual(reloaded.entries.map(\.title), ["kept"])
+    }
+
+    // A file that fails decryption or parsing may be a plaintext leftover
+    // from an older build; it must be removed, not silently kept on disk.
+    func testRemovesHistoryFileItCannotDecode() throws {
+        try FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("legacy plaintext or foreign-key ciphertext".utf8).write(to: fileURL)
+
+        let history = NotificationHistory(fileURL: fileURL)
+
+        XCTAssertTrue(history.entries.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+    }
+
+    func testHistoryFileIsOwnerAccessOnly() throws {
+        let history = NotificationHistory(fileURL: fileURL)
+        history.record(payload(key: "a"))
+        let mode = try FileManager.default
+            .attributesOfItem(atPath: fileURL.path)[.posixPermissions] as? Int
+        XCTAssertEqual(mode, 0o600)
+    }
+
+    func testMemoryOnlyHistoryNeverReadsOrWritesDisk() throws {
+        try FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("plaintext that must be ignored".utf8).write(to: fileURL)
+        let original = try Data(contentsOf: fileURL)
+        let history = NotificationHistory(
+            fileURL: fileURL, persistenceEnabled: false)
+
+        XCTAssertTrue(history.entries.isEmpty)
+        history.record(payload(key: "a", title: "memory only"))
+        XCTAssertEqual(history.entries.map(\.title), ["memory only"])
+        XCTAssertEqual(try Data(contentsOf: fileURL), original)
     }
 
     func testClearEmptiesAndPersists() {

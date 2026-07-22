@@ -8,27 +8,26 @@ import org.json.JSONObject
 // failure just leaves the pairing in open mode until the next attempt.
 object Enrollment {
 
+    internal fun confirmsCurrentIdentity(result: MacClient.SendResult): Boolean =
+        result is MacClient.SendResult.Ok ||
+            result is MacClient.SendResult.Failed && result.reason == "HTTP 403"
+
     fun ensure(store: PairingStore, client: MacClient, host: String, port: Int): Boolean {
-        if (store.clientEnrolled) return true
-        val certB64 = ClientIdentity.certificateDerBase64() ?: return false
-        val body = JSONObject().put("v", 1).put("cert", certB64).toString()
-        return when (val result = client.postEnroll(host, port, body)) {
-            is MacClient.SendResult.Ok -> {
-                store.clientEnrolled = true
-                true
-            }
-            // 403 means the server is already locked. Reaching /enroll at all
-            // required a successful mutual-TLS handshake, which only our
-            // enrolled certificate can complete, so we are the enrolled phone.
-            is MacClient.SendResult.Failed -> {
-                if (result.reason.contains("403")) {
-                    store.clientEnrolled = true
-                    true
-                } else {
-                    false
-                }
-            }
-            MacClient.SendResult.AuthFailed -> false
-        }
+        // Use the certificate captured by this client's TLS key managers. A
+        // separate Keystore read could race a rotation and enroll a certificate
+        // different from the one that authenticated this connection.
+        val identity = client.clientIdentity ?: return false
+        if (store.isClientEnrolled(identity.fingerprint)) return true
+        val body = JSONObject()
+            .put("v", 1)
+            .put("cert", identity.certificateDerBase64)
+            .toString()
+        val result = client.postEnroll(host, port, body)
+        // 403 means the server is already locked. Reaching /enroll at all
+        // required a successful mutual-TLS handshake, which only the currently
+        // enrolled certificate can complete.
+        if (!confirmsCurrentIdentity(result)) return false
+        store.markClientEnrolled(identity.fingerprint)
+        return true
     }
 }

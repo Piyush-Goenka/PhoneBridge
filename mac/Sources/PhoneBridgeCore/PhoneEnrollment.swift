@@ -12,6 +12,10 @@ public enum EnrollmentOutcome: Equatable {
 
 public protocol PhoneEnroller: AnyObject {
     func enroll(certDer: Data) -> EnrollmentOutcome
+    // Called after the HTTP 200 write for an accepted enrollment completes.
+    // Relocking earlier can close the very connection carrying that response;
+    // never relocking after a failed write would leave the listener TLS-open.
+    func enrollmentResponseWriteCompleted()
 }
 
 // On-disk store for the single enrolled phone certificate. The file is the
@@ -45,11 +49,13 @@ public enum PhoneCertStore {
 // Owns the open/locked decision and the certificate write. Lives off the main
 // actor because enrollment arrives on a SwiftNIO thread; a lock guards the
 // mode flag. AppState observes `onEnrolled` to restart the listener locked
-// and close the pairing window.
+// and close the pairing window, but only after RequestHandler's response write
+// has completed.
 public final class EnrollmentCoordinator: PhoneEnroller {
     private let certPath: URL
     private let lock = NSLock()
     private var open: Bool
+    private var relockPending = false
     public var onEnrolled: (() -> Void)?
 
     public init(certPath: URL, open: Bool) {
@@ -65,21 +71,34 @@ public final class EnrollmentCoordinator: PhoneEnroller {
 
     public func enroll(certDer: Data) -> EnrollmentOutcome {
         lock.lock()
-        let isOpen = open
-        lock.unlock()
-        guard isOpen else { return .locked }
-        guard PhoneCertStore.isValidDER(certDer) else { return .invalid }
-
-        do {
-            try PhoneCertStore.writePEM(der: certDer, to: certPath)
-        } catch {
-            return .failed
+        let outcome: EnrollmentOutcome
+        if !open {
+            outcome = .locked
+        } else if !PhoneCertStore.isValidDER(certDer) {
+            outcome = .invalid
+        } else {
+            do {
+                try PhoneCertStore.writePEM(der: certDer, to: certPath)
+                open = false
+                relockPending = true
+                outcome = .accepted
+            } catch {
+                outcome = .failed
+            }
         }
-
-        lock.lock()
-        open = false
         lock.unlock()
-        onEnrolled?()
-        return .accepted
+        return outcome
+    }
+
+    public func enrollmentResponseWriteCompleted() {
+        lock.lock()
+        guard relockPending else {
+            lock.unlock()
+            return
+        }
+        relockPending = false
+        let callback = onEnrolled
+        lock.unlock()
+        callback?()
     }
 }

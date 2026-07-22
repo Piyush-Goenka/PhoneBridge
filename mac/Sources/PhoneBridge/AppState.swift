@@ -6,8 +6,14 @@ import PhoneBridgeCore
 
 @MainActor
 final class AppState: ObservableObject {
+    private static let mirroringDefaultsKey = "mirroring"
     @Published var mirroring = true {
-        didSet { gate.enabled = mirroring }
+        didSet {
+            gate.enabled = mirroring
+            // Off must survive a restart: silently reverting to mirroring
+            // would betray the user's expectation of privacy.
+            UserDefaults.standard.set(mirroring, forKey: Self.mirroringDefaultsKey)
+        }
     }
     @Published var statusLine = "Starting"
     @Published var startsAtLogin = SMAppService.mainApp.status == .enabled
@@ -19,6 +25,7 @@ final class AppState: ObservableObject {
     private let server = BridgeServer()
     private let bonjour = BonjourAdvertiser()
     private let history: NotificationHistory
+    private let historyPersistenceEnabled: Bool
     let historyModel = HistoryModel()
     private var iconStore: DiskIconStore?
     private var pairing: PairingInfo?
@@ -35,16 +42,36 @@ final class AppState: ObservableObject {
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("PhoneBridge")
         appDir = dir
+        // Everything under this directory (history, icons, phone cert) is
+        // this user's business only; keep other local users out at the root.
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o700], ofItemAtPath: dir.path)
         phoneCertPath = PhoneCertStore.path(directory: dir)
-        // Encrypt history at rest with a Keychain-held key; fall back to
-        // plaintext only if the Keychain is somehow unavailable, so history
-        // still works rather than vanishing.
-        let cipher: HistoryCipher = (try? KeychainHistoryCipher()) ?? PlaintextHistoryCipher()
+        // Never persist notification content unless the encryption key is
+        // available. If Keychain access fails, history remains usable for this
+        // process only and no plaintext fallback touches disk.
+        let cipher: HistoryCipher
+        if KeychainHistoryCipher.shouldAttemptPersistenceForCurrentProcess,
+           let encrypted = try? KeychainHistoryCipher() {
+            cipher = encrypted
+            historyPersistenceEnabled = true
+        } else {
+            cipher = PlaintextHistoryCipher()
+            historyPersistenceEnabled = false
+        }
         history = NotificationHistory(
-            fileURL: dir.appendingPathComponent("history.json"), cipher: cipher)
+            fileURL: dir.appendingPathComponent("history.json"), cipher: cipher,
+            persistenceEnabled: historyPersistenceEnabled)
         gate = GatedSink(
             wrapping: HistorySink(wrapping: notificationCards, history: history),
             calls: CallHistorySink(wrapping: callPanel, history: history))
+        // didSet does not fire during init: restore the persisted toggle into
+        // both the published property and the gate by hand.
+        let storedMirroring = UserDefaults.standard
+            .object(forKey: Self.mirroringDefaultsKey) as? Bool ?? true
+        mirroring = storedMirroring
+        gate.enabled = storedMirroring
         historyModel.entries = history.entries
         history.onChange = { [historyModel] entries in
             DispatchQueue.main.async { historyModel.entries = entries }
@@ -101,7 +128,12 @@ final class AppState: ObservableObject {
             phoneCertPath: phoneCertPath, mode: mode)
         bonjour.stop()
         bonjour.publish(port: server.port)
-        statusLine = "Listening on port \(server.port)"
+        statusLine = listeningStatus()
+    }
+
+    private func listeningStatus() -> String {
+        let base = "Listening on port \(server.port)"
+        return historyPersistenceEnabled ? base : base + " — history is memory-only"
     }
 
     var isPaired: Bool { PhoneCertStore.loadTrustRoot(at: phoneCertPath) != nil }
@@ -109,14 +141,30 @@ final class AppState: ObservableObject {
     // Forget the enrolled phone, rotate the token so any old QR photograph or
     // leaked token stops working, reopen for pairing, and show the QR.
     func unpair() {
-        try? FileManager.default.removeItem(at: phoneCertPath)
+        // Revocation must fail closed. Once unpair begins, no listener using
+        // the old in-memory token/certificate may survive a later error.
+        server.stop()
+        bonjour.stop()
+        enrollment?.setOpen(false)
+        pairing = nil
+        enrollment = nil
+        // Hide without closing: the close observer schedules a re-lock and
+        // could otherwise restart the old listener if token rotation fails.
+        qrWindow?.orderOut(nil)
         do {
             _ = try Pairing.rotateToken()
+            if FileManager.default.fileExists(atPath: phoneCertPath.path) {
+                try FileManager.default.removeItem(at: phoneCertPath)
+            }
             let info = try Pairing.ensure(directory: appDir)
             try bringUpServer(info: info, mode: .open)
             showQRWindow()
         } catch {
-            statusLine = "Unpair failed: \(error.localizedDescription)"
+            server.stop()
+            bonjour.stop()
+            pairing = nil
+            enrollment = nil
+            statusLine = "Unpair failed: \(error.localizedDescription) — server stopped"
         }
     }
 
@@ -127,12 +175,13 @@ final class AppState: ObservableObject {
         let current = Pairing.primaryIPv4()
         guard current != lastKnownIPv4 else { return }
         lastKnownIPv4 = current
+        guard server.isRunning else { return }
         bonjour.stop()
         bonjour.publish(port: server.port)
         if let qrWindow, qrWindow.isVisible, let pairing {
             qrWindow.contentView = NSHostingView(rootView: qrContent(info: pairing))
         }
-        statusLine = "Listening on port \(server.port)"
+        statusLine = listeningStatus()
     }
 
     func showHistoryWindow() {
@@ -197,7 +246,7 @@ final class AppState: ObservableObject {
     // Switch to open mode so /enroll is accepted. Idempotent.
     private func openForPairing() {
         enrollment?.setOpen(true)
-        guard server.mode != .open else { return }
+        guard server.mode != .open || !server.isRunning else { return }
         do {
             try server.reload(mode: .open, phoneCertPath: phoneCertPath)
             bonjour.stop()
@@ -216,14 +265,15 @@ final class AppState: ObservableObject {
     private func relockIfEnrolled() {
         guard PhoneCertStore.loadTrustRoot(at: phoneCertPath) != nil else { return }
         enrollment?.setOpen(false)
-        guard server.mode != .locked else { return }
+        guard server.mode != .locked || !server.isRunning else { return }
         do {
             try server.reload(mode: .locked, phoneCertPath: phoneCertPath)
             bonjour.stop()
             bonjour.publish(port: server.port)
-            statusLine = "Listening on port \(server.port)"
+            statusLine = listeningStatus()
         } catch {
-            // Keep the (still-running) open listener rather than going dark.
+            // reload() stops before rebinding, so a failed lock transition is
+            // fail-closed: the listener remains down instead of staying open.
             statusLine = "Lock restart failed: \(error.localizedDescription)"
         }
     }

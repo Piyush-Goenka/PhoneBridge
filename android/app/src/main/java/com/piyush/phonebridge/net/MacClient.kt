@@ -7,7 +7,11 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import java.security.cert.CertificateException
 import java.util.concurrent.TimeUnit
 
-class MacClient(private val token: String, fingerprintHex: String) {
+class MacClient(
+    private val token: String,
+    fingerprintHex: String,
+    internal val clientIdentity: ClientIdentity.TlsMaterial? = ClientIdentity.tlsMaterial(),
+) {
 
     sealed interface SendResult {
         data class Ok(val needIcon: Boolean) : SendResult
@@ -26,7 +30,9 @@ class MacClient(private val token: String, fingerprintHex: String) {
     init {
         val trustManager = PinnedTls.trustManager(fingerprintHex)
         client = OkHttpClient.Builder()
-            .sslSocketFactory(PinnedTls.socketFactory(trustManager), trustManager)
+            .sslSocketFactory(
+                PinnedTls.socketFactory(trustManager, clientIdentity?.keyManagers),
+                trustManager)
             .hostnameVerifier { _, _ -> true }
             .connectTimeout(3, TimeUnit.SECONDS)
             .readTimeout(3, TimeUnit.SECONDS)
@@ -36,6 +42,13 @@ class MacClient(private val token: String, fingerprintHex: String) {
 
     private val waitClient: OkHttpClient by lazy {
         client.newBuilder().readTimeout(55, TimeUnit.SECONDS).build()
+    }
+
+    // A cached client owns pooled TLS sessions and possibly a live long-poll.
+    // Credential rotation must close both, not merely drop this Kotlin object.
+    fun close() {
+        client.dispatcher.cancelAll()
+        client.connectionPool.evictAll()
     }
 
     fun postNotify(host: String, port: Int, json: String): SendResult =
