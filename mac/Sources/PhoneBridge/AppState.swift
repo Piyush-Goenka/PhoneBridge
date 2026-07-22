@@ -48,12 +48,11 @@ final class AppState: ObservableObject {
         try? FileManager.default.setAttributes(
             [.posixPermissions: 0o700], ofItemAtPath: dir.path)
         phoneCertPath = PhoneCertStore.path(directory: dir)
-        // Never persist notification content unless the encryption key is
-        // available. If Keychain access fails, history remains usable for this
-        // process only and no plaintext fallback touches disk.
+        // Never persist notification content unless its directory-local
+        // encryption key is available. On a file error, history remains usable
+        // for this process only and no plaintext fallback touches disk.
         let cipher: HistoryCipher
-        if KeychainHistoryCipher.shouldAttemptPersistenceForCurrentProcess,
-           let encrypted = try? KeychainHistoryCipher() {
+        if let encrypted = try? FileHistoryCipher(directory: dir) {
             cipher = encrypted
             historyPersistenceEnabled = true
         } else {
@@ -124,7 +123,7 @@ final class AppState: ObservableObject {
             calls: callRegistry, callSink: gate, enroller: coordinator)
         server.stop()
         try server.start(
-            certPath: info.certPath, keyPEM: info.keyPEM, handler: handler,
+            certPath: info.certPath, keyPath: info.keyPath, handler: handler,
             phoneCertPath: phoneCertPath, mode: mode)
         bonjour.stop()
         bonjour.publish(port: server.port)
@@ -134,6 +133,11 @@ final class AppState: ObservableObject {
     private func listeningStatus() -> String {
         let base = "Listening on port \(server.port)"
         return historyPersistenceEnabled ? base : base + " — history is memory-only"
+    }
+
+    var statusSymbolName: String {
+        if statusLine == "Starting" { return "hourglass" }
+        return server.isRunning ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
     }
 
     var isPaired: Bool { PhoneCertStore.loadTrustRoot(at: phoneCertPath) != nil }
@@ -152,7 +156,7 @@ final class AppState: ObservableObject {
         // could otherwise restart the old listener if token rotation fails.
         qrWindow?.orderOut(nil)
         do {
-            _ = try Pairing.rotateToken()
+            _ = try Pairing.rotateToken(directory: appDir)
             if FileManager.default.fileExists(atPath: phoneCertPath.path) {
                 try FileManager.default.removeItem(at: phoneCertPath)
             }

@@ -48,13 +48,14 @@ mDNS answer therefore cannot poison the cache.
 - Stopping or restarting the listener (unpair, open/locked mode switches)
   also severs every already-accepted connection, so a session from the old
   trust regime cannot outlive it by keeping traffic inside the idle window.
-- The token, TLS private key, and history-encryption key are stored in the Mac
-  Keychain. Notification history is AES-GCM encrypted at rest; if the history
-  key cannot be obtained, history becomes memory-only instead of falling back
-  to plaintext. A history file that no longer decrypts is deleted at startup
-  rather than left on disk. Android pairing data is stored in encrypted
-  preferences and the client private key remains non-exportable in Android
-  Keystore.
+- The token, TLS private key, and history-encryption key are owner-only files
+  under `~/Library/Application Support/PhoneBridge`. The directory is mode
+  `0700` and secret files are mode `0600`. Notification history is AES-GCM
+  encrypted at rest; if the history key cannot be obtained, history becomes
+  memory-only instead of falling back to plaintext. A history file that no
+  longer decrypts is deleted at startup rather than left on disk. Android
+  pairing data is stored in encrypted preferences and the client private key
+  remains non-exportable in Android Keystore.
 - Android migrates an older plaintext pairing, allowlist, and mirroring toggles
   into encrypted preferences once, then removes the plaintext copy only after
   the encrypted write succeeds. APK replacement and listener disconnection

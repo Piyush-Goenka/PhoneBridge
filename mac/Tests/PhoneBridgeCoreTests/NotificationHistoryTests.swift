@@ -4,10 +4,31 @@ import XCTest
 final class NotificationHistoryTests: XCTestCase {
     private var fileURL: URL!
 
-    func testAdHocOrUnknownSignatureDisablesKeychainHistoryPersistence() {
-        XCTAssertFalse(KeychainHistoryCipher.permitsPersistence(signingFlags: nil))
-        XCTAssertFalse(KeychainHistoryCipher.permitsPersistence(signingFlags: 0x0002))
-        XCTAssertTrue(KeychainHistoryCipher.permitsPersistence(signingFlags: 0))
+    func testFileHistoryCipherPersistsOwnerOnlyKey() throws {
+        let directory = fileURL.deletingLastPathComponent()
+        let first = try FileHistoryCipher(directory: directory)
+        let plaintext = Data("private notification".utf8)
+        let ciphertext = try first.seal(plaintext)
+        let keyPath = directory.appendingPathComponent(FileHistoryCipher.keyFileName)
+
+        XCTAssertNotEqual(ciphertext, plaintext)
+        XCTAssertEqual(try Data(contentsOf: keyPath).count, 32)
+        let mode = try FileManager.default
+            .attributesOfItem(atPath: keyPath.path)[.posixPermissions] as? Int
+        XCTAssertEqual(mode, 0o600)
+
+        let reloaded = try FileHistoryCipher(directory: directory)
+        XCTAssertEqual(try reloaded.open(ciphertext), plaintext)
+    }
+
+    func testFileHistoryCipherRejectsInvalidStoredKey() throws {
+        let directory = fileURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        let keyPath = directory.appendingPathComponent(FileHistoryCipher.keyFileName)
+        try Data("too short".utf8).write(to: keyPath)
+
+        XCTAssertThrowsError(try FileHistoryCipher(directory: directory))
     }
 
     override func setUp() {

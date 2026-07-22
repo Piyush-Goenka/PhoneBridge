@@ -1,15 +1,6 @@
 import XCTest
 @testable import PhoneBridgeCore
 
-// Simulates a Keychain that rejects the TLS private key, to prove the
-// temporary key file the generator writes never survives the failure.
-private final class KeyRejectingSecretStore: SecretStore {
-    func data(for account: String) -> Data? { nil }
-    func set(_ data: Data, for account: String) throws {
-        if account == Pairing.keyAccount { throw SecretStoreError.storeFailed(-1) }
-    }
-}
-
 final class PairingTests: XCTestCase {
     private var dir: URL!
 
@@ -22,64 +13,61 @@ final class PairingTests: XCTestCase {
         try? FileManager.default.removeItem(at: dir)
     }
 
-    func testGeneratesCertKeyAndToken() throws {
-        let info = try Pairing.ensure(directory: dir, secrets: InMemorySecretStore())
+    func testGeneratesCertKeyAndTokenFiles() throws {
+        let info = try Pairing.ensure(directory: dir)
         XCTAssertTrue(FileManager.default.fileExists(atPath: info.certPath.path))
-        XCTAssertFalse(info.keyPEM.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: info.keyPath.path))
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: dir.appendingPathComponent("token").path))
         XCTAssertFalse(info.token.isEmpty)
     }
 
     func testFingerprintIs64LowercaseHex() throws {
-        let info = try Pairing.ensure(directory: dir, secrets: InMemorySecretStore())
+        let info = try Pairing.ensure(directory: dir)
         XCTAssertEqual(info.fingerprint.count, 64)
         XCTAssertTrue(info.fingerprint.allSatisfy { "0123456789abcdef".contains($0) })
     }
 
     func testStableAcrossCalls() throws {
-        let secrets = InMemorySecretStore()
-        let first = try Pairing.ensure(directory: dir, secrets: secrets)
-        let second = try Pairing.ensure(directory: dir, secrets: secrets)
+        let first = try Pairing.ensure(directory: dir)
+        let originalKey = try Data(contentsOf: first.keyPath)
+        let second = try Pairing.ensure(directory: dir)
         XCTAssertEqual(first.token, second.token)
         XCTAssertEqual(first.fingerprint, second.fingerprint)
-        XCTAssertEqual(first.keyPEM, second.keyPEM)
+        XCTAssertEqual(originalKey, try Data(contentsOf: second.keyPath))
     }
 
-    // The key and token must live in the secret store, never as plaintext
-    // files on disk.
-    func testKeyAndTokenAreNotOnDisk() throws {
-        let secrets = InMemorySecretStore()
-        let info = try Pairing.ensure(directory: dir, secrets: secrets)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("key.pem").path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("token").path))
-        XCTAssertEqual(secrets.data(for: Pairing.tokenAccount), Data(info.token.utf8))
-        XCTAssertEqual(secrets.data(for: Pairing.keyAccount), info.keyPEM)
+    func testPrivateFilesAndDirectoryAreOwnerOnly() throws {
+        let info = try Pairing.ensure(directory: dir)
+        let directoryMode = try FileManager.default
+            .attributesOfItem(atPath: dir.path)[.posixPermissions] as? Int
+        XCTAssertEqual(directoryMode, 0o700)
+
+        for url in [info.keyPath, dir.appendingPathComponent("token")] {
+            let mode = try FileManager.default
+                .attributesOfItem(atPath: url.path)[.posixPermissions] as? Int
+            XCTAssertEqual(mode, 0o600)
+        }
     }
 
-    // An earlier build stored the key and token as files; ensure() must pull
-    // them into the secret store and delete the plaintext copies.
-    func testMigratesLegacyFilesIntoSecretStore() throws {
-        let fm = FileManager.default
-        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        let certPath = dir.appendingPathComponent("cert.pem")
-        let keyPath = dir.appendingPathComponent("key.pem")
-        try Pairing.generateCert(certPath: certPath, keyPath: keyPath)
-        let tokenPath = dir.appendingPathComponent("token")
-        try "legacy-token".write(to: tokenPath, atomically: true, encoding: .utf8)
+    func testMissingKeyRegeneratesMatchingCertificatePair() throws {
+        let first = try Pairing.ensure(directory: dir)
+        try FileManager.default.removeItem(at: first.keyPath)
 
-        let secrets = InMemorySecretStore()
-        let info = try Pairing.ensure(directory: dir, secrets: secrets)
+        let second = try Pairing.ensure(directory: dir)
 
-        XCTAssertEqual(info.token, "legacy-token")
-        XCTAssertFalse(fm.fileExists(atPath: keyPath.path))
-        XCTAssertFalse(fm.fileExists(atPath: tokenPath.path))
-        XCTAssertNotNil(secrets.data(for: Pairing.keyAccount))
+        XCTAssertNotEqual(second.fingerprint, first.fingerprint)
+        XCTAssertEqual(second.token, first.token)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: second.keyPath.path))
     }
 
-    func testFailedKeyStoreLeavesNoTempKeyOnDisk() {
-        XCTAssertThrowsError(
-            try Pairing.ensure(directory: dir, secrets: KeyRejectingSecretStore()))
-        XCTAssertFalse(FileManager.default.fileExists(
-            atPath: dir.appendingPathComponent("key.tmp.pem").path))
+    func testRotateTokenPersistsReplacement() throws {
+        let first = try Pairing.ensure(directory: dir)
+        let rotated = try Pairing.rotateToken(directory: dir)
+        let reloaded = try Pairing.ensure(directory: dir)
+
+        XCTAssertNotEqual(rotated, first.token)
+        XCTAssertEqual(reloaded.token, rotated)
     }
 
     func testPrivateIPv4Recognition() {
@@ -101,7 +89,7 @@ final class PairingTests: XCTestCase {
     }
 
     func testQRPayloadIsValidJSON() throws {
-        let info = try Pairing.ensure(directory: dir, secrets: InMemorySecretStore())
+        let info = try Pairing.ensure(directory: dir)
         let payload = Pairing.qrPayload(info: info, port: 52735)
         let obj = try JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any]
         XCTAssertEqual(obj?["v"] as? Int, 1)

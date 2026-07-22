@@ -58,7 +58,7 @@ public final class BridgeServer {
     // Retained so a mode switch can rebind the same listener with a new TLS
     // context without the caller re-supplying everything.
     private var certPath: URL?
-    private var keyPEM: Data?
+    private var keyPath: URL?
     private var handler: RequestHandler?
     private var preferredPort = 52735
     private var phoneCertPath: URL?
@@ -67,12 +67,12 @@ public final class BridgeServer {
     public init() {}
 
     public func start(
-        certPath: URL, keyPEM: Data,
+        certPath: URL, keyPath: URL,
         handler: RequestHandler, preferredPort: Int = 52735,
         phoneCertPath: URL? = nil, mode: ServerMode = .open
     ) throws {
         self.certPath = certPath
-        self.keyPEM = keyPEM
+        self.keyPath = keyPath
         self.handler = handler
         self.preferredPort = preferredPort
         self.phoneCertPath = phoneCertPath
@@ -163,10 +163,10 @@ public final class BridgeServer {
     private func makeContext(mode: ServerMode) throws -> (
         context: NIOSSLContext, expectedClientLeafDER: [UInt8]?
     ) {
-        guard let certPath, let keyPEM else { throw PairingError.badPEM }
+        guard let certPath, let keyPath else { throw PairingError.badPEM }
         let certs = try NIOSSLCertificate.fromPEMFile(certPath.path)
             .map { NIOSSLCertificateSource.certificate($0) }
-        let key = try NIOSSLPrivateKey(bytes: Array(keyPEM), format: .pem)
+        let key = try NIOSSLPrivateKey(file: keyPath.path, format: .pem)
         var tls = TLSConfiguration.makeServerConfiguration(
             certificateChain: certs, privateKey: .privateKey(key))
         // TLS 1.0/1.1 are obsolete; the phone client speaks 1.2+.
