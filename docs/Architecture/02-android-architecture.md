@@ -51,6 +51,7 @@ flowchart TD
     subgraph STATE["State and credentials"]
         STORE[("PairingStore<br/>encrypted preferences")]
         ID[("ClientIdentity<br/>Android Keystore EC P-256")]
+        REACH[("MacReachability<br/>process-wide live status")]
         LOG[("SendLog<br/>memory-only, last 20")]
         ICON_CACHE[("AppIcons<br/>memory cache")]
     end
@@ -63,8 +64,10 @@ flowchart TD
     QR --> MAIN
     MAIN <--> STORE
     MAIN <--> ID
+    MAIN <--> REACH
     SERVICE <--> STORE
     SERVICE --> CLIENT
+    CLIENT --> REACH
     SERVICE --> RESOLVER
     SERVICE --> ICON_CACHE
     SERVICE --> LOG
@@ -78,7 +81,7 @@ flowchart TD
     class OS_NOTIF,TELEPHONY,WIFI,PACKAGES,MAIN,COMPOSE,QR,SERVICE,EXTRACT,CALL_DECIDE,FILTER,DEDUP,CALL_CONTROL android;
     class CLIENT,RESOLVER,MDNS,SWEEP network;
     class ENROLL,ID security;
-    class STORE,LOG,ICON_CACHE data;
+    class STORE,REACH,LOG,ICON_CACHE data;
 ```
 
 ## Posted-notification decision flow
@@ -132,6 +135,7 @@ The call route is evaluated before the ordinary structural filter because dialer
 | [`CallSessionDecider`](../../android/app/src/main/java/com/piyush/phonebridge/relay/CallSessionDecider.kt) | Distinguishes new calls, caller-name updates, phone-side answers, and ignored reposts | Pure decision logic |
 | [`CallControl`](../../android/app/src/main/java/com/piyush/phonebridge/relay/CallControl.kt) | Guards and executes answer, reject, silence, end, and ringer restoration | Process memory plus Android telephony state |
 | [`MacClient`](../../android/app/src/main/java/com/piyush/phonebridge/net/MacClient.kt) | Pinned-TLS OkHttp client, bearer header, endpoint methods, 3-second ordinary timeouts and 55-second call-wait timeout | Cached by all credentials that affect a TLS session |
+| [`MacReachability`](../../android/app/src/main/java/com/piyush/phonebridge/net/MacReachability.kt) | Merges foreground pinned-TLS probes with verified HTTP responses without allowing an older failed probe to overwrite a newer success | Process-wide `StateFlow` |
 | [`HostResolver`](../../android/app/src/main/java/com/piyush/phonebridge/net/HostResolver.kt) | Bounded mDNS, verified fallback sweep, cache update, and sweep cooldown | Created by UI/service; one shared failure timestamp |
 | [`PairingStore`](../../android/app/src/main/java/com/piyush/phonebridge/pairing/PairingStore.kt) | Pairing credentials, host cache, toggles, allowlist, and enrolled identity fingerprint | Encrypted preferences |
 | [`ClientIdentity`](../../android/app/src/main/java/com/piyush/phonebridge/net/ClientIdentity.kt) | Creates, health-checks, rotates, and exposes the non-exportable mTLS identity | Android Keystore plus process caches |
@@ -143,6 +147,7 @@ The call route is evaluated before the ordinary structural filter because dialer
 | Pairing and preferences | Encrypted | Bearer token, Mac certificate fingerprint, verified numeric host, port, allowlist, global/call toggles, enrolled client fingerprint |
 | Client identity | Keystore | EC P-256 private key and self-signed certificate; private key is non-exportable |
 | Recent sends | Memory only | At most 20 outcome entries for the Activity tab |
+| Mac reachability | Memory only | Latest pinned foreground probe or verified delivery result; reset on unpair |
 | Duplicate cache | Memory only | Notification content fingerprints within a 30-second window |
 | Delivered keys | Memory only | Up to roughly 200 successfully delivered keys used to decide whether removal needs `/dismiss` |
 | Active calls | Memory only | One effective call session, caller name, and whether it was answered from the Mac |
@@ -156,6 +161,7 @@ On first secure-store access, an older plaintext token, pin, host/port, allowlis
 
 - Notification callbacks launch work into one service-owned `SupervisorJob` on `Dispatchers.IO`; a failed event does not cancel other event work.
 - The Compose UI uses a separate main-thread coroutine scope and moves probing/enrollment work to `Dispatchers.IO`.
+- Foreground probes and real relay responses update one race-safe reachability flow. Enrollment is best-effort maintenance and is not itself interpreted as liveness.
 - Active calls use a concurrent map; compound session decisions synchronize around that map. Delivered/answered sets are synchronized collections.
 - `MacClient` is reused only while the bearer token, Mac fingerprint, and client-certificate fingerprint all match. Identity change closes pooled connections and cancels live calls.
 - Listener disconnect and APK replacement both request an Android notification-listener rebind so system backoff does not leave mirroring dormant.

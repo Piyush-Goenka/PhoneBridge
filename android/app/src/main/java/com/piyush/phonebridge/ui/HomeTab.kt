@@ -47,7 +47,7 @@ fun HomeTab(
     store: PairingStore,
     paired: MutableState<Boolean>,
     accessGranted: MutableState<Boolean>,
-    macReachable: MutableState<Boolean?>,
+    macReachable: Boolean?,
     verifying: Boolean,
     onEnableAccess: () -> Unit,
     onScanQr: () -> Unit,
@@ -124,8 +124,8 @@ fun HomeTab(
                     else "Notification access needed")
                 if (paired.value) {
                     StatusLine(
-                        ok = macReachable.value,
-                        text = when (macReachable.value) {
+                        ok = macReachable,
+                        text = when (macReachable) {
                             true -> "Mac reachable now"
                             false -> "Mac not reachable right now"
                             null -> "Checking if the Mac is reachable"

@@ -11,8 +11,10 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.core.app.NotificationManagerCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import com.piyush.phonebridge.net.ClientIdentity
@@ -20,6 +22,7 @@ import com.piyush.phonebridge.net.Enrollment
 import com.piyush.phonebridge.net.HostResolver
 import com.piyush.phonebridge.net.LocalAddressPolicy
 import com.piyush.phonebridge.net.MacClient
+import com.piyush.phonebridge.net.MacReachability
 import com.piyush.phonebridge.net.SweepProber
 import com.piyush.phonebridge.pairing.PairingStore
 import com.piyush.phonebridge.pairing.QrPayload
@@ -37,9 +40,6 @@ class MainActivity : ComponentActivity() {
     private val paired = mutableStateOf(false)
     private val accessGranted = mutableStateOf(false)
 
-    // null while a check is running (or nothing is paired), then the result
-    // of actually knocking on the Mac's port with the pinned certificate.
-    private val macReachable = mutableStateOf<Boolean?>(null)
     // Pairing flow state, surfaced to the UI (#8): a scanned payload awaiting
     // the user's confirmation to replace an existing pairing, an error to
     // show, and whether a reachability verification is in flight.
@@ -106,30 +106,19 @@ class MainActivity : ComponentActivity() {
         store.apply(payload)
         paired.value = true
         Toast.makeText(this, "Paired with ${payload.host}", Toast.LENGTH_LONG).show()
-        enrollWhilePairing(payload.host, payload.port)
+        // The reachability check also performs the one required enrollment.
+        // Keeping those operations in one coroutine avoids racing the Mac's
+        // open-to-locked listener restart with a second probe.
         checkMacReachable()
     }
 
     private fun unpair() {
+        reachabilityJob?.cancel()
         store.clear()
         ClientIdentity.delete()
         paired.value = false
-        macReachable.value = null
+        MacReachability.reset()
         Toast.makeText(this, "Unpaired from the Mac", Toast.LENGTH_LONG).show()
-    }
-
-    // Best-effort immediate enrollment right after a scan, so a fresh pairing
-    // locks the Mac to mutual TLS without waiting for the first notification.
-    // If the Mac is not reachable yet, the relay service enrolls on its next
-    // successful send.
-    private fun enrollWhilePairing(host: String, port: Int) {
-        val token = store.token ?: return
-        val fingerprint = store.fingerprint ?: return
-        uiScope.launch {
-            withContext(Dispatchers.IO) {
-                Enrollment.ensure(store, MacClient(token, fingerprint), host, port)
-            }
-        }
     }
 
     private val callPermissionLauncher = registerForActivityResult(
@@ -165,6 +154,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         store = PairingStore(this)
         setContent {
+            val macReachable by MacReachability.reachable.collectAsStateWithLifecycle()
             PhoneBridgeTheme {
                 MainScreen(
                     store = store,
@@ -217,34 +207,52 @@ class MainActivity : ComponentActivity() {
     // (mDNS, then the guarded subnet sweep) and verify whatever it finds.
     private fun checkMacReachable() {
         reachabilityJob?.cancel()
-        macReachable.value = null
-        if (!store.isPaired) return
-        val token = store.token ?: return
-        val fingerprint = store.fingerprint ?: return
+        if (!store.isPaired) {
+            MacReachability.reset()
+            return
+        }
+        val token = store.token ?: run {
+            MacReachability.reset()
+            return
+        }
+        val fingerprint = store.fingerprint ?: run {
+            MacReachability.reset()
+            return
+        }
+        val check = MacReachability.beginCheck()
         reachabilityJob = uiScope.launch {
-            val reachable = withContext(Dispatchers.IO) {
-                val prober = SweepProber(fingerprint)
+            val destination = withContext(Dispatchers.IO) {
+                // A cached address gets the same patient connection window as
+                // real delivery. The 300 ms default remains appropriate only
+                // for the many-address subnet sweep.
+                val prober = SweepProber(fingerprint, connectTimeoutMs = 3_000)
                 val cached = store.host?.takeIf {
                     prober.findMac(listOf(it), store.port) != null
                 }?.let { it to store.port }
-                val destination = cached
-                    ?: HostResolver(this@MainActivity).rediscover(store)
-                if (destination != null) {
-                    // Opening the Mac's pairing QR switches it to enrollment
-                    // mode. Reopening this app can now repair a rotated client
-                    // identity immediately, without waiting for another phone
-                    // notification or forcing a second QR scan.
-                    Enrollment.ensure(
-                        store,
-                        MacClient(token, fingerprint),
-                        destination.first,
-                        destination.second,
-                    )
-                } else {
-                    false
+                cached ?: HostResolver(this@MainActivity).rediscover(store)
+            }
+
+            // The pinned TLS probe above is the reachability result. Enrollment
+            // is separate best-effort maintenance and must not turn a verified
+            // live Mac into "not reachable" if its request races a reload.
+            MacReachability.completeCheck(check, destination != null)
+            if (destination != null) {
+                withContext(Dispatchers.IO) {
+                    val client = MacClient(token, fingerprint)
+                    try {
+                        // Opening the Mac's pairing QR switches it to enrollment
+                        // mode. Reopening this app can repair a rotated identity.
+                        Enrollment.ensure(
+                            store,
+                            client,
+                            destination.first,
+                            destination.second,
+                        )
+                    } finally {
+                        client.close()
+                    }
                 }
             }
-            macReachable.value = reachable
         }
     }
 }

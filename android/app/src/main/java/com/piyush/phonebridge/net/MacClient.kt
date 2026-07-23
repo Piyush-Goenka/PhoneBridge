@@ -11,6 +11,7 @@ class MacClient(
     private val token: String,
     fingerprintHex: String,
     internal val clientIdentity: ClientIdentity.TlsMaterial? = ClientIdentity.tlsMaterial(),
+    private val onReachable: () -> Unit = {},
 ) {
 
     sealed interface SendResult {
@@ -74,6 +75,7 @@ class MacClient(
             .build()
         return try {
             waitClient.newCall(request).execute().use { response ->
+                reportReachable()
                 if (!response.isSuccessful) {
                     WaitResult.Failed("HTTP ${response.code}")
                 } else {
@@ -99,6 +101,7 @@ class MacClient(
             .build()
         return try {
             client.newCall(request).execute().use { response ->
+                reportReachable()
                 when {
                     response.code == 401 -> SendResult.AuthFailed
                     !response.isSuccessful -> SendResult.Failed("HTTP ${response.code}")
@@ -118,5 +121,11 @@ class MacClient(
             }
             SendResult.Failed(e.message ?: e.javaClass.simpleName)
         }
+    }
+
+    // Reachability reporting must never turn an otherwise successful request
+    // into a failure if a UI observer is unavailable.
+    private fun reportReachable() {
+        runCatching(onReachable)
     }
 }

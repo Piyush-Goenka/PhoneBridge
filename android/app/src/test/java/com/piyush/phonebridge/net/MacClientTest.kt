@@ -78,6 +78,37 @@ class MacClientTest {
     }
 
     @Test
+    fun anyPinnedHttpResponseReportsReachability() {
+        var reachableCount = 0
+        server.enqueue(MockResponse().setResponseCode(401).setBody("{}"))
+        val client = MacClient(
+            "wrong",
+            fingerprint,
+            onReachable = { reachableCount += 1 },
+        )
+
+        client.postNotify(server.hostName, server.port, "{}")
+
+        assertEquals(1, reachableCount)
+    }
+
+    @Test
+    fun connectionFailureDoesNotReportReachability() {
+        var reachableCount = 0
+        val port = server.port
+        server.shutdown()
+        val client = MacClient(
+            "tok",
+            fingerprint,
+            onReachable = { reachableCount += 1 },
+        )
+
+        client.postNotify("localhost", port, "{}")
+
+        assertEquals(0, reachableCount)
+    }
+
+    @Test
     fun connectionRefusedIsFailed() {
         val port = server.port
         server.shutdown()

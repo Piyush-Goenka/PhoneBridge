@@ -53,7 +53,7 @@ fun MainScreen(
     store: PairingStore,
     paired: MutableState<Boolean>,
     accessGranted: MutableState<Boolean>,
-    macReachable: MutableState<Boolean?>,
+    macReachable: Boolean?,
     verifyingPairing: MutableState<Boolean>,
     pendingPairing: MutableState<QrPayload?>,
     pairingError: MutableState<String?>,

@@ -15,6 +15,7 @@ import com.piyush.phonebridge.net.Enrollment
 import com.piyush.phonebridge.net.HostResolver
 import com.piyush.phonebridge.net.MacClient
 import com.piyush.phonebridge.net.MacClientCacheKey
+import com.piyush.phonebridge.net.MacReachability
 import com.piyush.phonebridge.pairing.PairingStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -415,7 +416,18 @@ class NotificationRelayService : NotificationListenerService() {
         synchronized(clientLock) {
             if (client == null || clientKey != key) {
                 client?.close()
-                client = MacClient(token, macFingerprint, identity)
+                client = MacClient(
+                    token,
+                    macFingerprint,
+                    identity,
+                    onReachable = {
+                        // Ignore a response from a request that was already in
+                        // flight when the user unpaired or changed Macs.
+                        if (store.token == token && store.fingerprint == macFingerprint) {
+                            MacReachability.recordSuccess()
+                        }
+                    },
+                )
                 clientKey = key
             }
             return client

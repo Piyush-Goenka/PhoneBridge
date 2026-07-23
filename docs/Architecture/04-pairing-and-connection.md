@@ -146,7 +146,7 @@ Important properties:
 - A subnet sweep is limited to private IPv4 Wi-Fi networks no wider than `/23`; broad/corporate networks are not swept.
 - A TLS probe presents the Android client certificate, so discovery continues to work when the Mac is locked.
 - Notification delivery retries the current event after a successful rediscovery. Nothing is queued for later.
-- Foreground reachability checks use the same verified location logic. The Mac also republishes Bonjour and rerenders a visible QR when wake/network changes alter its primary IPv4 address.
+- Foreground reachability checks use the same verified location logic, while successful relay HTTP responses update the same process-wide UI state. A newer delivery success cannot be overwritten by an older failed probe, and enrollment outcome is kept separate from liveness. The Mac also republishes Bonjour and rerenders a visible QR when wake/network changes alter its primary IPv4 address.
 - The production Mac listener is IPv4 on fixed port 52735. The port carried by a verified QR or Bonjour result is authoritative; the server does not silently move to an ephemeral port.
 
 ## Mac server-mode state machine
